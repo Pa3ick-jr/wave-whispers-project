@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: 20
           cache: 'npm'
-          cache-dependency-path: './wave-whispers-project'
+          cache-dependency-path: './wave-whispers-project/package-lock.json'
 
       - name: Install dependencies
         run: npm ci
