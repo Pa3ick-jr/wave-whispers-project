@@ -1,16 +1,15 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   Plus, Trash2, ChevronUp, ChevronDown, CalendarDays,
-  X, Check, ArrowLeft, User, ListChecks, Sparkles, Printer, Lightbulb, Sun, Moon, LogOut, Copy
+  X, Check, ArrowLeft, User, ListChecks, Sparkles, Printer, Lightbulb, Sun, Moon, LogOut, Copy, Users
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "./supabaseClient.js";
 
-// ---------- constants ----------
 const SCHOOL_NAME = "Wave Whispers";
 const STATUS = { NOT_STARTED: "not_started", PRACTICING: "practicing", MASTERED: "mastered" };
 const STATUS_ORDER = [STATUS.NOT_STARTED, STATUS.PRACTICING, STATUS.MASTERED];
 const STATUS_LABEL = { not_started: "Not started", practicing: "Practicing", mastered: "Mastered" };
-const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no 0/O/1/I to avoid confusion
+const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
 function genAccessCode(len = 6) {
   let out = "";
@@ -79,12 +78,12 @@ function currentFocusLevelFor(student, curriculum) {
 }
 
 // ============================================================
-// ROOT: decides between the "choose your path" screen,
-// the instructor (admin) dashboard, and the student portal.
+// ROOT
 // ============================================================
 export default function Root() {
-  const [session, setSession] = useState(undefined); // undefined = still checking, null = logged out
-  const [mode, setMode] = useState("choose"); // choose | admin-login | student
+  const [session, setSession] = useState(undefined);
+  const [profile, setProfile] = useState(undefined);
+  const [mode, setMode] = useState("choose");
   const [theme, setTheme] = useState(() => localStorage.getItem("ww:theme") || "dark");
 
   useEffect(() => { localStorage.setItem("ww:theme", theme); }, [theme]);
@@ -92,9 +91,17 @@ export default function Root() {
   useEffect(() => {
     if (!isSupabaseConfigured) { setSession(null); return; }
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!session) { setProfile(session === null ? null : undefined); return; }
+    (async () => {
+      const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+      setProfile(data || null);
+    })();
+  }, [session]);
 
   if (!isSupabaseConfigured) {
     return (
@@ -103,7 +110,7 @@ export default function Root() {
         <div className="lb-setup-notice">
           <LogoMark size={28} />
           <h2>Almost there</h2>
-          <p>This app needs to be connected to a Supabase project before it'll work. Add <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> as repository secrets (or in a local <code>.env</code> file) and rebuild.</p>
+          <p>This app needs to be connected to a Supabase project. Add <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> as repository secrets and rebuild.</p>
         </div>
       </div>
     );
@@ -118,14 +125,29 @@ export default function Root() {
     );
   }
 
-  if (session) {
-    return <AdminApp session={session} theme={theme} setTheme={setTheme} />;
+  if (session && profile === undefined) {
+    return (
+      <div className={"lb-root" + (theme === "dark" ? " lb-dark" : "")} style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+        <style>{CSS}</style>
+        <div className="lb-loading"><LogoMark size={28} /><span>Finding your lane…</span></div>
+      </div>
+    );
+  }
+
+  if (session && profile === null) {
+    return <Onboarding theme={theme} onDone={async () => {
+      const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+      setProfile(data || null);
+    }} onSignOut={() => supabase.auth.signOut()} />;
+  }
+
+  if (session && profile) {
+    return <AdminApp session={session} profile={profile} theme={theme} setTheme={setTheme} />;
   }
 
   if (mode === "student") {
     return <StudentPortal theme={theme} setTheme={setTheme} onBack={() => setMode("choose")} />;
   }
-
   if (mode === "admin-login") {
     return <AdminLogin theme={theme} onBack={() => setMode("choose")} />;
   }
@@ -139,7 +161,7 @@ export default function Root() {
         <div className="lb-choose-cards">
           <button className="lb-choose-card" onClick={() => setMode("admin-login")}>
             <User size={22} />
-            <span>I'm the instructor</span>
+            <span>I'm the owner or an instructor</span>
             <small>Sign in to manage swimmers and curriculum</small>
           </button>
           <button className="lb-choose-card" onClick={() => setMode("student")}>
@@ -154,7 +176,7 @@ export default function Root() {
 }
 
 // ============================================================
-// ADMIN LOGIN
+// ADMIN LOGIN (just auth — role/org happens in Onboarding after)
 // ============================================================
 function AdminLogin({ theme, onBack }) {
   const [isSignUp, setIsSignUp] = useState(false);
@@ -167,10 +189,12 @@ function AdminLogin({ theme, onBack }) {
     e.preventDefault();
     setError(""); setBusy(true);
     const fn = isSignUp ? supabase.auth.signUp : supabase.auth.signInWithPassword;
-    const { error } = await fn({ email, password });
+    const { data, error } = await fn({ email, password });
     setBusy(false);
-    if (error) setError(error.message);
-    else if (isSignUp) setError("Account created — check your email if confirmation is required, then sign in.");
+    if (error) { setError(error.message); return; }
+    if (isSignUp && !data.session) {
+      setError("Account created! If email confirmation is on, check your inbox, then come back and sign in — you'll be asked whether to create a new school or join one with an invite code.");
+    }
   }
 
   return (
@@ -179,7 +203,7 @@ function AdminLogin({ theme, onBack }) {
       <div className="lb-choose">
         <button className="lb-text-btn" onClick={onBack} style={{ alignSelf: "flex-start", marginBottom: 16 }}>&larr; Back</button>
         <div className="lb-choose-brand"><LogoMark size={30} /><div className="lb-title">{SCHOOL_NAME.toUpperCase()}</div></div>
-        <p className="lb-choose-sub">{isSignUp ? "Create your instructor account" : "Instructor sign in"}</p>
+        <p className="lb-choose-sub">{isSignUp ? "Create your account" : "Sign in"}</p>
         <form className="lb-login-form" onSubmit={submit}>
           <input type="email" placeholder="Email" required value={email} onChange={e => setEmail(e.target.value)} />
           <input type="password" placeholder="Password" required minLength={6} value={password} onChange={e => setPassword(e.target.value)} />
@@ -187,48 +211,125 @@ function AdminLogin({ theme, onBack }) {
           <button className="lb-print-btn" type="submit" disabled={busy}>{busy ? "Please wait…" : isSignUp ? "Create account" : "Sign in"}</button>
         </form>
         <button className="lb-text-btn" onClick={() => setIsSignUp(v => !v)} style={{ marginTop: 14 }}>
-          {isSignUp ? "Already have an account? Sign in" : "First time here? Create an instructor account"}
+          {isSignUp ? "Already have an account? Sign in" : "First time here? Create an account"}
         </button>
+        <p className="lb-choose-sub" style={{ fontSize: 11.5, marginTop: 18 }}>
+          Both the school owner and instructors sign in the same way — right after this, you'll choose whether you're starting a new school or joining one with an invite code.
+        </p>
       </div>
     </div>
   );
 }
 
 // ============================================================
-// ADMIN APP (authenticated instructor dashboard)
+// ONBOARDING — shown once, right after first sign-in, when the
+// person has no profile (no org membership) yet.
 // ============================================================
-function AdminApp({ session, theme, setTheme }) {
+function Onboarding({ theme, onDone, onSignOut }) {
+  const [path, setPath] = useState("choose"); // choose | new-school | join
+  const [schoolName, setSchoolName] = useState(SCHOOL_NAME);
+  const [displayName, setDisplayName] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function createSchool(e) {
+    e.preventDefault();
+    setBusy(true); setError("");
+    const { error } = await supabase.rpc("create_org_and_owner", { org_name: schoolName.trim() || SCHOOL_NAME, name_in: displayName.trim() });
+    setBusy(false);
+    if (error) { setError(error.message); return; }
+    onDone();
+  }
+  async function joinSchool(e) {
+    e.preventDefault();
+    setBusy(true); setError("");
+    const { error } = await supabase.rpc("join_org_with_invite", { invite_code: inviteCode.trim().toUpperCase(), name_in: displayName.trim() });
+    setBusy(false);
+    if (error) { setError(error.message); return; }
+    onDone();
+  }
+
+  return (
+    <div className={"lb-root" + (theme === "dark" ? " lb-dark" : "")}>
+      <style>{CSS}</style>
+      <div className="lb-choose">
+        <div className="lb-choose-brand"><LogoMark size={30} /><div className="lb-title">{SCHOOL_NAME.toUpperCase()}</div></div>
+        {path === "choose" && (
+          <React.Fragment>
+            <p className="lb-choose-sub">One more step — you're signed in, but not linked to a school yet</p>
+            <div className="lb-choose-cards">
+              <button className="lb-choose-card" onClick={() => setPath("new-school")}>
+                <User size={22} /><span>Start a new school</span><small>You'll be the owner</small>
+              </button>
+              <button className="lb-choose-card" onClick={() => setPath("join")}>
+                <Users size={22} /><span>Join as an instructor</span><small>You'll need an invite code from your owner</small>
+              </button>
+            </div>
+            <button className="lb-text-btn" onClick={onSignOut} style={{ marginTop: 16 }}>Sign out</button>
+          </React.Fragment>
+        )}
+        {path === "new-school" && (
+          <form className="lb-login-form" onSubmit={createSchool}>
+            <button type="button" className="lb-text-btn" onClick={() => setPath("choose")} style={{ alignSelf: "flex-start" }}>&larr; Back</button>
+            <input placeholder="Your school's name" value={schoolName} onChange={e => setSchoolName(e.target.value)} />
+            <input placeholder="Your name (optional)" value={displayName} onChange={e => setDisplayName(e.target.value)} />
+            {error && <div className="lb-login-error">{error}</div>}
+            <button className="lb-print-btn" type="submit" disabled={busy}>{busy ? "Setting up…" : "Create my school"}</button>
+          </form>
+        )}
+        {path === "join" && (
+          <form className="lb-login-form" onSubmit={joinSchool}>
+            <button type="button" className="lb-text-btn" onClick={() => setPath("choose")} style={{ alignSelf: "flex-start" }}>&larr; Back</button>
+            <input placeholder="Invite code" value={inviteCode} onChange={e => setInviteCode(e.target.value)} style={{ textTransform: "uppercase", letterSpacing: 2, textAlign: "center", fontFamily: "'IBM Plex Mono',monospace" }} />
+            <input placeholder="Your name (optional)" value={displayName} onChange={e => setDisplayName(e.target.value)} />
+            {error && <div className="lb-login-error">{error}</div>}
+            <button className="lb-print-btn" type="submit" disabled={busy}>{busy ? "Joining…" : "Join school"}</button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// ADMIN APP
+// ============================================================
+function AdminApp({ session, profile, theme, setTheme }) {
   const [loaded, setLoaded] = useState(false);
   const [curriculum, setCurriculum] = useState([]);
   const [students, setStudents] = useState([]);
+  const [instructors, setInstructors] = useState([]);
   const [view, setView] = useState("roster");
   const [activeStudentId, setActiveStudentId] = useState(null);
   const [addingStudent, setAddingStudent] = useState(false);
   const [newStudentName, setNewStudentName] = useState("");
   const [showReport, setShowReport] = useState(false);
 
-  const ownerId = session.user.id;
+  const isOwner = profile.role === "owner";
+  const orgId = profile.org_id;
 
   async function fetchAll() {
-    const { data: levels } = await supabase.from("curriculum_levels").select("*").eq("owner_id", ownerId).order("position");
-    const { data: skills } = await supabase.from("curriculum_skills").select("*").eq("owner_id", ownerId).order("position");
-    const { data: studentRows } = await supabase.from("students").select("*").eq("owner_id", ownerId).order("created_at");
+    const { data: levels } = await supabase.from("curriculum_levels").select("*").eq("org_id", orgId).order("position");
+    const { data: skills } = await supabase.from("curriculum_skills").select("*").eq("org_id", orgId).order("position");
+    const { data: studentRows } = await supabase.from("students").select("*").eq("org_id", orgId).order("created_at");
     const { data: studentSkillRows } = await supabase.from("student_skills").select("*");
     const { data: sessionRows } = await supabase.from("sessions").select("*").order("date", { ascending: false });
+    const { data: profileRows } = await supabase.from("profiles").select("*").eq("org_id", orgId);
 
     const curr = (levels || []).map(l => ({
       id: l.id, name: l.name, position: l.position,
       skills: (skills || []).filter(s => s.level_id === l.id).map(s => ({ id: s.id, name: s.name, position: s.position })),
     }));
-
     const studs = (studentRows || []).map(s => ({
-      id: s.id, name: s.name, createdAt: s.created_at, accessCode: s.access_code,
+      id: s.id, name: s.name, createdAt: s.created_at, accessCode: s.access_code, instructorId: s.instructor_id,
       skills: Object.fromEntries((studentSkillRows || []).filter(ss => ss.student_id === s.id).map(ss => [ss.skill_id, ss.status])),
       sessions: (sessionRows || []).filter(sess => sess.student_id === s.id).map(sess => ({ id: sess.id, date: sess.date, note: sess.note || "", goal: sess.goal || "" })),
     }));
 
     setCurriculum(curr);
     setStudents(studs);
+    setInstructors((profileRows || []).filter(p => p.role === "instructor"));
     setLoaded(true);
   }
 
@@ -237,27 +338,28 @@ function AdminApp({ session, theme, setTheme }) {
   async function addStudent() {
     const name = newStudentName.trim();
     if (!name) return;
-    let code = genAccessCode();
+    const code = genAccessCode();
     const id = uid();
-    const { error } = await supabase.from("students").insert({ id, owner_id: ownerId, name, access_code: code, created_at: todayStr() });
+    const { error } = await supabase.from("students").insert({ id, org_id: orgId, name, access_code: code, created_at: todayStr() });
     if (error) { alert("Couldn't add swimmer: " + error.message); return; }
-    setStudents(prev => [...prev, { id, name, createdAt: todayStr(), accessCode: code, skills: {}, sessions: [] }]);
+    setStudents(prev => [...prev, { id, name, createdAt: todayStr(), accessCode: code, instructorId: null, skills: {}, sessions: [] }]);
     setNewStudentName(""); setAddingStudent(false); setActiveStudentId(id); setView("roster");
   }
-
   async function deleteStudent(id) {
     await supabase.from("students").delete().eq("id", id);
     setStudents(prev => prev.filter(s => s.id !== id));
     if (activeStudentId === id) setActiveStudentId(null);
   }
-
+  async function assignInstructor(studentId, instructorId) {
+    setStudents(prev => prev.map(s => s.id === studentId ? { ...s, instructorId: instructorId || null } : s));
+    await supabase.from("students").update({ instructor_id: instructorId || null }).eq("id", studentId);
+  }
   async function cycleSkill(studentId, skillId) {
     const student = students.find(s => s.id === studentId);
     const newStatus = nextStatus(student.skills[skillId] || STATUS.NOT_STARTED);
     setStudents(prev => prev.map(s => s.id !== studentId ? s : { ...s, skills: { ...s.skills, [skillId]: newStatus } }));
     await supabase.from("student_skills").upsert({ student_id: studentId, skill_id: skillId, status: newStatus }, { onConflict: "student_id,skill_id" });
   }
-
   async function addSession(studentId, session) {
     const id = uid();
     setStudents(prev => prev.map(s => s.id === studentId ? { ...s, sessions: [{ id, ...session }, ...s.sessions] } : s));
@@ -267,11 +369,10 @@ function AdminApp({ session, theme, setTheme }) {
     setStudents(prev => prev.map(s => s.id === studentId ? { ...s, sessions: s.sessions.filter(x => x.id !== sessionId) } : s));
     await supabase.from("sessions").delete().eq("id", sessionId);
   }
-
   async function addLevel() {
     const id = uid(); const position = curriculum.length;
     setCurriculum(prev => [...prev, { id, name: "New level", position, skills: [] }]);
-    await supabase.from("curriculum_levels").insert({ id, owner_id: ownerId, name: "New level", position });
+    await supabase.from("curriculum_levels").insert({ id, org_id: orgId, name: "New level", position });
   }
   async function renameLevel(levelId, name) {
     setCurriculum(prev => prev.map(l => l.id === levelId ? { ...l, name } : l));
@@ -297,7 +398,7 @@ function AdminApp({ session, theme, setTheme }) {
     const level = curriculum.find(l => l.id === levelId);
     const id = uid(); const position = level.skills.length;
     setCurriculum(prev => prev.map(l => l.id === levelId ? { ...l, skills: [...l.skills, { id, name: "New skill", position }] } : l));
-    await supabase.from("curriculum_skills").insert({ id, level_id: levelId, owner_id: ownerId, name: "New skill", position });
+    await supabase.from("curriculum_skills").insert({ id, level_id: levelId, org_id: orgId, name: "New skill", position });
   }
   async function renameSkill(levelId, skillId, name) {
     setCurriculum(prev => prev.map(l => l.id === levelId ? { ...l, skills: l.skills.map(sk => sk.id === skillId ? { ...sk, name } : sk) } : l));
@@ -320,18 +421,38 @@ function AdminApp({ session, theme, setTheme }) {
       supabase.from("curriculum_skills").update({ position: swapIdx }).eq("id", skills[swapIdx].id),
     ]);
   }
-
   async function seedDefaultCurriculum() {
     for (const [levelIdx, lvl] of DEFAULT_CURRICULUM_NAMES.entries()) {
       const levelId = uid();
-      await supabase.from("curriculum_levels").insert({ id: levelId, owner_id: ownerId, name: lvl.name, position: levelIdx });
-      const skillRows = lvl.skills.map((n, i) => ({ id: uid(), level_id: levelId, owner_id: ownerId, name: n, position: i }));
+      await supabase.from("curriculum_levels").insert({ id: levelId, org_id: orgId, name: lvl.name, position: levelIdx });
+      const skillRows = lvl.skills.map((n, i) => ({ id: uid(), level_id: levelId, org_id: orgId, name: n, position: i }));
       await supabase.from("curriculum_skills").insert(skillRows);
     }
     fetchAll();
   }
+  const [inviteCode, setInviteCode] = useState("");
+  const [inviteBusy, setInviteBusy] = useState(false);
+  async function generateInvite() {
+    setInviteBusy(true);
+    const { data, error } = await supabase.rpc("create_invite");
+    setInviteBusy(false);
+    if (error) { alert(error.message); return; }
+    setInviteCode(data);
+  }
+  async function removeInstructor(instructorId) {
+    if (!confirm("Remove this instructor? Their assigned swimmers will become unassigned.")) return;
+    await supabase.from("students").update({ instructor_id: null }).eq("instructor_id", instructorId);
+    await supabase.from("profiles").delete().eq("id", instructorId);
+    setStudents(prev => prev.map(s => s.instructorId === instructorId ? { ...s, instructorId: null } : s));
+    setInstructors(prev => prev.filter(i => i.id !== instructorId));
+  }
 
   const activeStudent = students.find(s => s.id === activeStudentId) || null;
+  const instructorName = (id) => {
+    if (!id) return "Unassigned";
+    const inst = instructors.find(i => i.id === id);
+    return inst ? (inst.display_name || inst.email || "Instructor") : "Unassigned";
+  };
 
   if (showReport && activeStudent) {
     return (
@@ -340,7 +461,6 @@ function AdminApp({ session, theme, setTheme }) {
         currentFocusLevel={s => currentFocusLevelFor(s, curriculum)} onBack={() => setShowReport(false)} />
     );
   }
-
   if (!loaded) {
     return (
       <div className={"lb-root" + (theme === "dark" ? " lb-dark" : "")} style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
@@ -356,16 +476,15 @@ function AdminApp({ session, theme, setTheme }) {
       <header className="lb-header">
         <div className="lb-brand">
           <LogoMark size={24} />
-          <div><div className="lb-title">{SCHOOL_NAME.toUpperCase()}</div><div className="lb-subtitle">Lanebook · poolside progress tracker</div></div>
+          <div><div className="lb-title">{SCHOOL_NAME.toUpperCase()}</div><div className="lb-subtitle">{isOwner ? "Owner" : "Instructor"} · {profile.display_name || profile.email}</div></div>
         </div>
         <div className="lb-header-right">
           <nav className="lb-tabs">
             <button className={"lb-tab" + (view === "roster" ? " active" : "")} onClick={() => setView("roster")}><User size={15} /> Roster</button>
-            <button className={"lb-tab" + (view === "curriculum" ? " active" : "")} onClick={() => setView("curriculum")}><ListChecks size={15} /> Curriculum</button>
+            {isOwner && <button className={"lb-tab" + (view === "curriculum" ? " active" : "")} onClick={() => setView("curriculum")}><ListChecks size={15} /> Curriculum</button>}
+            {isOwner && <button className={"lb-tab" + (view === "instructors" ? " active" : "")} onClick={() => setView("instructors")}><Users size={15} /> Instructors</button>}
           </nav>
-          <button className="lb-theme-toggle" onClick={() => setTheme(t => t === "dark" ? "light" : "dark")} title="Toggle theme">
-            {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-          </button>
+          <button className="lb-theme-toggle" onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}</button>
           <button className="lb-theme-toggle" onClick={() => supabase.auth.signOut()} title="Log out"><LogOut size={16} /></button>
         </div>
       </header>
@@ -376,18 +495,18 @@ function AdminApp({ session, theme, setTheme }) {
             <aside className="lb-roster">
               <div className="lb-roster-head">
                 <span>Swimmers</span>
-                <button className="lb-icon-btn rope" onClick={() => setAddingStudent(v => !v)} aria-label="Add swimmer"><Plus size={16} /></button>
+                {isOwner && <button className="lb-icon-btn rope" onClick={() => setAddingStudent(v => !v)}><Plus size={16} /></button>}
               </div>
-              {addingStudent && (
+              {isOwner && addingStudent && (
                 <div className="lb-add-student">
                   <input autoFocus placeholder="Swimmer's name" value={newStudentName}
                     onChange={e => setNewStudentName(e.target.value)}
                     onKeyDown={e => { if (e.key === "Enter") addStudent(); if (e.key === "Escape") setAddingStudent(false); }} />
-                  <button className="lb-icon-btn mastered" onClick={addStudent} aria-label="Save"><Check size={15} /></button>
+                  <button className="lb-icon-btn mastered" onClick={addStudent}><Check size={15} /></button>
                 </div>
               )}
-              {students.length === 0 && !addingStudent && <div className="lb-empty-note">No swimmers yet. Tap + to add your first one.</div>}
-              {curriculum.length === 0 && (
+              {students.length === 0 && <div className="lb-empty-note">{isOwner ? "No swimmers yet. Tap + to add your first one." : "No swimmers assigned to you yet."}</div>}
+              {isOwner && curriculum.length === 0 && (
                 <button className="lb-add-level-btn" style={{ marginBottom: 12, fontSize: 12 }} onClick={seedDefaultCurriculum}>Start from a sample curriculum</button>
               )}
               <ul className="lb-roster-list">
@@ -399,7 +518,7 @@ function AdminApp({ session, theme, setTheme }) {
                         <span className="lb-avatar">{s.name.trim().charAt(0).toUpperCase() || "?"}</span>
                         <span className="lb-roster-item-text">
                           <span className="lb-roster-name">{s.name}</span>
-                          <span className="lb-roster-level">{focus ? focus.name : "No curriculum yet"}</span>
+                          <span className="lb-roster-level">{focus ? focus.name : "No curriculum yet"}{isOwner ? " · " + instructorName(s.instructorId) : ""}</span>
                         </span>
                         <span className="lb-mini-ring" style={{ "--pct": pct }}><span>{pct}%</span></span>
                       </button>
@@ -410,9 +529,10 @@ function AdminApp({ session, theme, setTheme }) {
             </aside>
             <main className="lb-main">
               {!activeStudent ? (
-                <div className="lb-placeholder"><Sparkles size={26} /><p>Pick a swimmer from the list, or add one, to see their lane.</p></div>
+                <div className="lb-placeholder"><Sparkles size={26} /><p>Pick a swimmer from the list to see their lane.</p></div>
               ) : (
-                <StudentDetail student={activeStudent} curriculum={curriculum}
+                <StudentDetail student={activeStudent} curriculum={curriculum} isOwner={isOwner} instructors={instructors}
+                  instructorName={instructorName} onAssignInstructor={val => assignInstructor(activeStudent.id, val)}
                   levelProgress={levelProgressFor} overallProgress={s => overallProgressFor(s, curriculum)}
                   currentFocusLevel={s => currentFocusLevelFor(s, curriculum)}
                   onCycleSkill={skillId => cycleSkill(activeStudent.id, skillId)}
@@ -425,11 +545,11 @@ function AdminApp({ session, theme, setTheme }) {
           </React.Fragment>
         )}
 
-        {view === "curriculum" && (
+        {view === "curriculum" && isOwner && (
           <main className="lb-main">
             <div className="lb-curriculum-intro">
               <h2>Your curriculum</h2>
-              <p>Shape this to match how <em>you</em> teach. Add levels, rename skills, reorder anything — every swimmer's lane updates automatically.</p>
+              <p>Shape this to match how <em>you</em> teach. Every swimmer's lane updates automatically — instructors see this too, but only you can edit it.</p>
             </div>
             <div className="lb-levels-editor">
               {curriculum.map((level, idx) => (
@@ -460,13 +580,52 @@ function AdminApp({ session, theme, setTheme }) {
             </div>
           </main>
         )}
+
+        {view === "instructors" && isOwner && (
+          <main className="lb-main">
+            <div className="lb-curriculum-intro">
+              <h2>Instructors</h2>
+              <p>Invite instructors and see who's training who. Instructors only see and update the swimmers assigned to them.</p>
+            </div>
+            <div style={{ marginBottom: 20 }}>
+              <button className="lb-print-btn" onClick={generateInvite} disabled={inviteBusy}>{inviteBusy ? "Generating…" : "+ Invite an instructor"}</button>
+              {inviteCode && (
+                <div className="lb-access-code" style={{ marginTop: 10, display: "inline-flex" }}>
+                  <Copy size={12} /> Share this code: <strong style={{ marginLeft: 4 }}>{inviteCode}</strong>
+                </div>
+              )}
+            </div>
+            <div className="lb-levels-editor">
+              {instructors.length === 0 && <div className="lb-empty-note">No instructors yet — invite one above.</div>}
+              {instructors.map(inst => {
+                const assigned = students.filter(s => s.instructorId === inst.id);
+                return (
+                  <div className="lb-level-card" key={inst.id}>
+                    <div className="lb-level-card-head">
+                      <span style={{ fontWeight: 700, fontSize: 14 }}>{inst.display_name || inst.email}</span>
+                      <button className="lb-icon-btn ghost danger" style={{ marginLeft: "auto" }} onClick={() => removeInstructor(inst.id)}><Trash2 size={15} /></button>
+                    </div>
+                    <div className="lb-empty-note" style={{ padding: "4px 0" }}>
+                      {assigned.length === 0 ? "No swimmers assigned" : assigned.map(s => s.name).join(", ")}
+                    </div>
+                  </div>
+                );
+              })}
+              {students.filter(s => !s.instructorId).length > 0 && (
+                <div className="lb-level-card">
+                  <div className="lb-level-card-head"><span style={{ fontWeight: 700, fontSize: 14 }}>Unassigned</span></div>
+                  <div className="lb-empty-note" style={{ padding: "4px 0" }}>{students.filter(s => !s.instructorId).map(s => s.name).join(", ")}</div>
+                </div>
+              )}
+            </div>
+          </main>
+        )}
       </div>
     </div>
   );
 }
 
-// ---------- student detail (admin view, editable) ----------
-function StudentDetail({ student, curriculum, levelProgress, overallProgress, currentFocusLevel, onCycleSkill, onAddSession, onDeleteSession, onDeleteStudent, onPrintReport }) {
+function StudentDetail({ student, curriculum, isOwner, instructors, instructorName, onAssignInstructor, levelProgress, overallProgress, currentFocusLevel, onCycleSkill, onAddSession, onDeleteSession, onDeleteStudent, onPrintReport }) {
   const [note, setNote] = useState(""), [goal, setGoal] = useState(""), [date, setDate] = useState(todayStr());
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
@@ -480,31 +639,34 @@ function StudentDetail({ student, curriculum, levelProgress, overallProgress, cu
     setNote(""); setGoal(""); setDate(todayStr());
   }
   function addSuggestionToNote(name) { setNote(prev => prev ? `${prev}, ${name}` : name); }
-  function copyCode() {
-    navigator.clipboard?.writeText(student.accessCode);
-    setCodeCopied(true); setTimeout(() => setCodeCopied(false), 1500);
-  }
+  function copyCode() { navigator.clipboard?.writeText(student.accessCode); setCodeCopied(true); setTimeout(() => setCodeCopied(false), 1500); }
 
   return (
     <div className="lb-detail">
       <div className="lb-detail-head">
         <div>
           <h2>{student.name}</h2>
-          <div className="lb-detail-sub">Since {student.createdAt} · Focus: {focus ? focus.name : "—"}</div>
-          <button className="lb-access-code" onClick={copyCode} title="Copy access code">
-            <Copy size={12} /> Access code: <strong>{student.accessCode}</strong>{codeCopied ? " · copied!" : ""}
-          </button>
+          <div className="lb-detail-sub">Since {student.createdAt} · Focus: {focus ? focus.name : "—"}{isOwner ? " · Trained by: " + instructorName(student.instructorId) : ""}</div>
+          <button className="lb-access-code" onClick={copyCode}><Copy size={12} /> Access code: <strong>{student.accessCode}</strong>{codeCopied ? " · copied!" : ""}</button>
+          {isOwner && (
+            <div style={{ marginTop: 8 }}>
+              <select value={student.instructorId || ""} onChange={e => onAssignInstructor(e.target.value)} style={{ padding: "6px 8px", borderRadius: 7, border: "1px solid var(--border)", fontSize: 12.5 }}>
+                <option value="">Unassigned</option>
+                {instructors.map(i => <option key={i.id} value={i.id}>{i.display_name || i.email}</option>)}
+              </select>
+            </div>
+          )}
         </div>
         <div className="lb-detail-head-right">
           <div className="lb-big-ring" style={{ "--pct": pct }}><span>{pct}%</span></div>
           <button className="lb-print-btn" onClick={onPrintReport}><Printer size={14} /> Print report</button>
-          {confirmDelete ? (
+          {isOwner && (confirmDelete ? (
             <div className="lb-confirm-delete">
               <span>Remove swimmer?</span>
               <button className="lb-icon-btn danger" onClick={onDeleteStudent}><Check size={14} /></button>
               <button className="lb-icon-btn ghost" onClick={() => setConfirmDelete(false)}><X size={14} /></button>
             </div>
-          ) : (<button className="lb-text-btn danger" onClick={() => setConfirmDelete(true)}>Remove</button>)}
+          ) : (<button className="lb-text-btn danger" onClick={() => setConfirmDelete(true)}>Remove</button>))}
         </div>
       </div>
 
@@ -514,10 +676,7 @@ function StudentDetail({ student, curriculum, levelProgress, overallProgress, cu
           if (total === 0) return null;
           return (
             <div className="lb-lane" key={level.id}>
-              <div className="lb-lane-label">
-                <span className="lb-lane-num">{String(idx + 1).padStart(2, "0")}</span><span>{level.name}</span>
-                <span className="lb-lane-pct">{Math.round(lp)}%</span>
-              </div>
+              <div className="lb-lane-label"><span className="lb-lane-num">{String(idx + 1).padStart(2, "0")}</span><span>{level.name}</span><span className="lb-lane-pct">{Math.round(lp)}%</span></div>
               <div className="lb-lane-track">
                 <div className="lb-lane-rope" />
                 {level.skills.map(sk => {
@@ -541,9 +700,7 @@ function StudentDetail({ student, curriculum, levelProgress, overallProgress, cu
         {suggestions.length > 0 && (
           <div className="lb-suggestions">
             <span className="lb-suggestions-label"><Lightbulb size={13} /> Suggested for next lesson</span>
-            <div className="lb-suggestions-chips">
-              {suggestions.map(sk => <button key={sk.id} className="lb-chip" onClick={() => addSuggestionToNote(sk.name)}>{sk.name} <Plus size={11} /></button>)}
-            </div>
+            <div className="lb-suggestions-chips">{suggestions.map(sk => <button key={sk.id} className="lb-chip" onClick={() => addSuggestionToNote(sk.name)}>{sk.name} <Plus size={11} /></button>)}</div>
           </div>
         )}
         <form className="lb-session-form" onSubmit={submitSession}>
@@ -572,9 +729,6 @@ function StudentDetail({ student, curriculum, levelProgress, overallProgress, cu
   );
 }
 
-// ============================================================
-// STUDENT PORTAL (public, no login — just an access code)
-// ============================================================
 function StudentPortal({ theme, setTheme, onBack }) {
   const [code, setCode] = useState("");
   const [data, setData] = useState(null);
@@ -597,7 +751,6 @@ function StudentPortal({ theme, setTheme, onBack }) {
     const curriculum = data.levels || [];
     const pct = overallProgressFor(student, curriculum);
     const focus = currentFocusLevelFor(student, curriculum);
-
     return (
       <div className={"lb-root" + (theme === "dark" ? " lb-dark" : "")}>
         <style>{CSS}</style>
@@ -605,7 +758,7 @@ function StudentPortal({ theme, setTheme, onBack }) {
           <div className="lb-brand"><LogoMark size={24} /><div><div className="lb-title">{SCHOOL_NAME.toUpperCase()}</div><div className="lb-subtitle">swimmer progress</div></div></div>
           <div className="lb-header-right">
             <button className="lb-theme-toggle" onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}</button>
-            <button className="lb-theme-toggle" onClick={() => setData(null)} title="Look up a different code"><ArrowLeft size={16} /></button>
+            <button className="lb-theme-toggle" onClick={() => setData(null)}><ArrowLeft size={16} /></button>
           </div>
         </header>
         <main className="lb-main" style={{ maxWidth: 720, margin: "0 auto" }}>
@@ -673,7 +826,6 @@ function StudentPortal({ theme, setTheme, onBack }) {
   );
 }
 
-// ---------- printable report ----------
 function PrintReportPage({ student, curriculum, levelProgress, overallProgress, currentFocusLevel, onBack }) {
   const pct = overallProgress(student), focus = currentFocusLevel(student), sessions = student.sessions;
   return (
@@ -752,12 +904,11 @@ const CSS = `
   --suggestion-bg:#241C10; --suggestion-border:#4A3A1C; --suggestion-text:#E0AF52;
 }
 *{box-sizing:border-box;}
-.lb-root{ font-family:'Inter',sans-serif; background:var(--wash); color:var(--ink); min-height:100vh; transition:background 0.2s, color 0.2s; }
+.lb-root{ font-family:'Inter',sans-serif; background:var(--wash); color:var(--ink); min-height:100vh; }
 .lb-root input, .lb-root textarea, .lb-root select{ background:var(--card); color:var(--ink); border-color:var(--border); font-family:inherit; }
 .lb-loading{ display:flex; flex-direction:column; align-items:center; gap:10px; color:var(--pool); font-family:'IBM Plex Mono',monospace; }
-.lb-setup-notice{ max-width:480px; margin:100px auto; text-align:center; display:flex; flex-direction:column; align-items:center; gap:10px; color:var(--ink); padding:0 20px; }
+.lb-setup-notice{ max-width:480px; margin:100px auto; text-align:center; display:flex; flex-direction:column; align-items:center; gap:10px; padding:0 20px; }
 .lb-setup-notice code{ background:var(--card); border:1px solid var(--border); padding:2px 6px; border-radius:4px; font-size:12px; }
-
 .lb-header{ display:flex; align-items:center; justify-content:space-between; padding:16px 20px; background:var(--pool-deep); color:#fff; gap:12px; flex-wrap:wrap; }
 .lb-brand{ display:flex; align-items:center; gap:10px; color:#fff; }
 .lb-title{ font-family:'Bebas Neue',sans-serif; font-size:22px; letter-spacing:2px; line-height:1; }
@@ -767,13 +918,11 @@ const CSS = `
 .lb-tab{ display:flex; align-items:center; gap:6px; padding:8px 14px; border-radius:999px; border:1px solid rgba(255,255,255,0.25); background:transparent; color:#DCEFEC; font-size:13px; font-weight:600; cursor:pointer; }
 .lb-tab.active{ background:var(--rope); border-color:var(--rope); color:#fff; }
 .lb-theme-toggle{ display:flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:50%; border:1px solid rgba(255,255,255,0.25); background:transparent; color:#DCEFEC; cursor:pointer; }
-.lb-theme-toggle:hover{ background:rgba(255,255,255,0.12); }
-
 .lb-choose{ max-width:420px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:20px; }
 .lb-choose-brand{ display:flex; align-items:center; gap:10px; color:var(--pool); margin-bottom:6px; }
 .lb-choose-brand .lb-title{ color:var(--pool-deep); }
 .lb-dark .lb-choose-brand .lb-title{ color:var(--ink); }
-.lb-choose-sub{ color:var(--muted); font-size:14px; margin-bottom:22px; }
+.lb-choose-sub{ color:var(--muted); font-size:14px; margin-bottom:22px; text-align:center; }
 .lb-choose-cards{ display:flex; flex-direction:column; gap:12px; width:100%; }
 .lb-choose-card{ display:flex; flex-direction:column; align-items:center; gap:6px; padding:20px; border-radius:14px; border:1px solid var(--border); background:var(--card); color:var(--ink); cursor:pointer; text-align:center; }
 .lb-choose-card:hover{ border-color:var(--pool); }
@@ -782,7 +931,6 @@ const CSS = `
 .lb-login-form{ display:flex; flex-direction:column; gap:10px; width:100%; }
 .lb-login-form input{ padding:11px 12px; border:1px solid var(--border); border-radius:9px; font-size:14px; }
 .lb-login-error{ font-size:12.5px; color:#C74B34; background:var(--suggestion-bg); border:1px solid var(--suggestion-border); padding:8px 10px; border-radius:8px; }
-
 .lb-body{ display:flex; align-items:flex-start; min-height:calc(100vh - 68px); }
 .lb-roster{ width:270px; flex-shrink:0; background:var(--card); border-right:1px solid var(--border); min-height:calc(100vh - 68px); padding:14px; }
 .lb-roster-head{ display:flex; align-items:center; justify-content:space-between; font-weight:700; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:var(--pool); margin-bottom:10px; }
@@ -797,12 +945,10 @@ const CSS = `
 .lb-roster-name{ font-size:13.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .lb-roster-level{ font-size:11px; color:var(--muted); }
 .lb-mini-ring{ font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--pool); flex-shrink:0; }
-
 .lb-main{ flex:1; padding:22px; min-width:0; }
 .lb-placeholder{ display:flex; flex-direction:column; align-items:center; gap:10px; color:var(--muted); text-align:center; margin-top:80px; }
 .lb-placeholder svg{ color:var(--rope); }
 .lb-empty-note{ font-size:13px; color:var(--muted); padding:10px 0; }
-
 .lb-icon-btn{ display:flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:8px; border:1px solid var(--border); background:var(--card); cursor:pointer; color:var(--ink); }
 .lb-icon-btn.rope{ background:var(--rope); border-color:var(--rope); color:#fff; }
 .lb-icon-btn.mastered{ background:var(--mastered); border-color:var(--mastered); color:#08201D; }
@@ -814,7 +960,6 @@ const CSS = `
 .lb-text-btn.danger{ color:#C74B34; }
 .lb-confirm-delete{ display:flex; align-items:center; gap:6px; font-size:12px; }
 .lb-access-code{ display:flex; align-items:center; gap:6px; font-size:11.5px; font-family:'IBM Plex Mono',monospace; color:var(--pool); background:none; border:1px dashed var(--pool); border-radius:7px; padding:4px 9px; margin-top:6px; cursor:pointer; }
-
 .lb-detail-head{ display:flex; justify-content:space-between; align-items:flex-start; gap:14px; margin-bottom:20px; flex-wrap:wrap; }
 .lb-detail-head h2{ font-family:'Bebas Neue',sans-serif; font-size:28px; letter-spacing:1px; margin:0; }
 .lb-detail-sub{ font-size:12.5px; color:var(--muted); margin-top:2px; }
@@ -828,14 +973,13 @@ const CSS = `
   background: conic-gradient(var(--pool) calc(var(--pct)*1%), var(--notstarted) 0);
 }
 .lb-mini-ring span{ background:var(--card); width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:8px; color:var(--ink); }
-
 .lb-lanes{ display:flex; flex-direction:column; gap:16px; margin-bottom:26px; }
 .lb-lane-label{ display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; margin-bottom:6px; }
 .lb-lane-num{ font-family:'IBM Plex Mono',monospace; color:var(--rope); font-size:11px; }
 .lb-lane-pct{ margin-left:auto; font-family:'IBM Plex Mono',monospace; color:var(--muted); font-size:12px; }
 .lb-lane-track{ position:relative; display:flex; gap:4px; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:8px; overflow-x:auto; }
 .lb-lane-rope{ position:absolute; top:0; left:16px; right:16px; height:1px; background-image:repeating-linear-gradient(90deg, var(--rope) 0 6px, transparent 6px 12px); opacity:0.5; }
-.lb-tile{ flex:1; min-width:96px; display:flex; flex-direction:column; align-items:flex-start; gap:4px; padding:9px 10px; border-radius:9px; border:1px solid var(--border); background:var(--wash); cursor:pointer; text-align:left; transition:background 0.2s, border-color 0.2s; color:var(--ink); }
+.lb-tile{ flex:1; min-width:96px; display:flex; flex-direction:column; align-items:flex-start; gap:4px; padding:9px 10px; border-radius:9px; border:1px solid var(--border); background:var(--wash); cursor:pointer; text-align:left; color:var(--ink); }
 .lb-tile-name{ font-size:12px; font-weight:600; line-height:1.25; }
 .lb-tile-status{ font-size:10px; font-family:'IBM Plex Mono',monospace; color:var(--muted); }
 .lb-tile-check{ height:14px; }
@@ -845,7 +989,6 @@ const CSS = `
 .lb-tile.mastered{ background:var(--mastered-bg); border-color:var(--mastered); }
 .lb-tile.mastered .lb-tile-status{ color:var(--mastered-text); }
 .lb-tile.mastered .lb-tile-check{ color:var(--mastered); }
-
 .lb-timeline-section h3{ display:flex; align-items:center; gap:8px; font-size:15px; margin-bottom:10px; }
 .lb-session-form{ display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; }
 .lb-session-form input[type="date"]{ width:130px; }
@@ -859,7 +1002,6 @@ const CSS = `
 .lb-timeline-date{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--pool); }
 .lb-timeline-note{ font-size:13px; margin-top:2px; }
 .lb-timeline-goal{ font-size:12px; color:var(--muted); margin-top:2px; }
-
 .lb-curriculum-intro{ margin-bottom:18px; max-width:640px; }
 .lb-curriculum-intro h2{ font-family:'Bebas Neue',sans-serif; font-size:26px; letter-spacing:1px; margin:0 0 6px; }
 .lb-curriculum-intro p{ font-size:13.5px; color:var(--muted); line-height:1.5; }
@@ -876,7 +1018,6 @@ const CSS = `
 .lb-skill-editor-list input:focus{ border-color:var(--pool); outline:none; background:var(--card); }
 .lb-add-skill-btn{ display:flex; align-items:center; gap:5px; font-size:12px; color:var(--pool); background:none; border:none; cursor:pointer; margin-top:8px; padding:4px 2px; font-weight:600; }
 .lb-add-level-btn{ display:flex; align-items:center; justify-content:center; gap:6px; padding:12px; border:1.5px dashed var(--pool); border-radius:12px; background:transparent; color:var(--pool); font-weight:700; cursor:pointer; font-size:13px; }
-
 @media (max-width: 760px){
   .lb-body{ flex-direction:column; }
   .lb-roster{ width:100%; border-right:none; border-bottom:1px solid var(--border); min-height:auto; }
@@ -886,15 +1027,14 @@ const CSS = `
   .lb-session-form{ flex-direction:column; }
   .lb-session-form input[type="date"]{ width:100%; }
 }
-
 .lb-print-btn{ display:flex; align-items:center; gap:6px; padding:7px 12px; border-radius:8px; border:1px solid var(--pool); background:var(--card); color:var(--pool); font-weight:600; font-size:12.5px; cursor:pointer; }
 .lb-print-btn:hover{ background:var(--wash); }
+.lb-print-btn:disabled{ opacity:0.5; cursor:not-allowed; }
 .lb-suggestions{ background:var(--suggestion-bg); border:1px solid var(--suggestion-border); border-radius:10px; padding:10px 12px; margin-bottom:14px; }
 .lb-suggestions-label{ display:flex; align-items:center; gap:6px; font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; color:var(--suggestion-text); margin-bottom:8px; }
 .lb-suggestions-chips{ display:flex; flex-wrap:wrap; gap:6px; }
 .lb-chip{ display:flex; align-items:center; gap:5px; padding:5px 10px; border-radius:999px; border:1px solid var(--rope); background:var(--card); color:var(--rope); font-size:12px; font-weight:600; cursor:pointer; }
 .lb-chip:hover{ background:var(--rope); color:#fff; }
-
 .lb-report-page{ background:#EEF5F4; min-height:100vh; padding:20px; }
 .lb-report-toolbar{ display:flex; justify-content:space-between; align-items:center; max-width:720px; margin:0 auto 16px; }
 .lb-report-sheet{ max-width:720px; margin:0 auto; background:#fff; border-radius:14px; padding:36px 40px; box-shadow:0 1px 3px rgba(0,0,0,0.08); color:#16262A; }
@@ -920,7 +1060,6 @@ const CSS = `
 .lb-report-session-date{ font-family:'IBM Plex Mono',monospace; color:#0E5E59; flex-shrink:0; width:80px; }
 .lb-report-session-goal{ color:#5B7370; }
 .lb-report-footer{ margin-top:26px; padding-top:12px; border-top:1px solid #DCE7E5; font-size:10.5px; color:#8FA3A0; text-align:center; }
-
 @media print{
   .no-print{ display:none !important; }
   .lb-report-page{ background:#fff; padding:0; }
