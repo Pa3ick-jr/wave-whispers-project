@@ -5,5 +5,5 @@ import react from '@vitejs/plugin-react'
 // If you name your repo something other than "wave-whispers", change it here too.
 export default defineConfig({
   plugins: [react()],
-  base: '/wave-whispers/',
+  base: '/wave-whispers-project/',
 })
