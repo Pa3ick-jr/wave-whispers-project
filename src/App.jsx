@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   Plus, Trash2, ChevronUp, ChevronDown, CalendarDays,
-  X, Check, ArrowLeft, User, ListChecks, Sparkles, Printer, Lightbulb, Sun, Moon, LogOut, Copy, Users
+  X, Check, ArrowLeft, User, ListChecks, Sparkles, Printer, Lightbulb, Sun, Moon, LogOut, Copy, Users, Home, LayoutTemplate, AlertTriangle
 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "./supabaseClient.js";
 
-const SCHOOL_NAME = "Wave Whispers";
+const SCHOOL_NAME = "Rove and Ripple";
+// Only this email can register a brand-new school. Set this to YOUR login email.
+const SUPER_ADMIN_EMAIL = "you@example.com";
 const STATUS = { NOT_STARTED: "not_started", PRACTICING: "practicing", MASTERED: "mastered" };
 const STATUS_ORDER = [STATUS.NOT_STARTED, STATUS.PRACTICING, STATUS.MASTERED];
 const STATUS_LABEL = { not_started: "Not started", practicing: "Practicing", mastered: "Mastered" };
@@ -32,14 +34,6 @@ function LogoMark({ size = 22 }) {
 }
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2, 10) + Date.now().toString(36));
-
-const DEFAULT_CURRICULUM_NAMES = [
-  { name: "Water Comfort", skills: ["Enter & exit safely", "Blow bubbles", "Front float", "Back float", "Submerge & recover"] },
-  { name: "Basic Propulsion", skills: ["Kick with board", "Streamline push-off", "Front glide", "Back glide", "Arm circles (prep)"] },
-  { name: "Stroke Introduction", skills: ["Freestyle arms", "Rhythmic breathing", "Basic backstroke", "Treading water"] },
-  { name: "Stroke Refinement", skills: ["Full freestyle", "Full backstroke", "Breaststroke kick", "Endurance swim (25m)", "Diving entry"] },
-];
-
 const todayStr = () => new Date().toISOString().slice(0, 10);
 function nextStatus(s) { const i = STATUS_ORDER.indexOf(s); return STATUS_ORDER[(i + 1) % STATUS_ORDER.length]; }
 
@@ -63,18 +57,33 @@ function levelProgressFor(student, level) {
   });
   return { pct: ((mastered + practicing * 0.5) / total) * 100, total };
 }
-function overallProgressFor(student, curriculum) {
-  const allIds = curriculum.flatMap(l => l.skills.map(sk => sk.id));
+function overallProgressFor(student) {
+  const allIds = (student.curriculum || []).flatMap(l => l.skills.map(sk => sk.id));
   if (allIds.length === 0) return 0;
   const mastered = allIds.filter(id => student.skills[id] === STATUS.MASTERED).length;
   return Math.round((mastered / allIds.length) * 100);
 }
-function currentFocusLevelFor(student, curriculum) {
+function currentFocusLevelFor(student) {
+  const curriculum = student.curriculum || [];
   for (const level of curriculum) {
     if (level.skills.length === 0) continue;
     if (levelProgressFor(student, level).pct < 100) return level;
   }
   return curriculum[curriculum.length - 1] || null;
+}
+function planStatusFor(student) {
+  const today = todayStr();
+  if (student.planType === "package") {
+    const used = student.sessions.filter(s => s.date >= student.planStartedAt).length;
+    const remaining = Math.max(0, student.packageSize - used);
+    return { expired: remaining <= 0, kind: "package", label: `${remaining} of ${student.packageSize} lessons left` };
+  }
+  const curMonth = today.slice(0, 7);
+  const startMonth = (student.planStartedAt || today).slice(0, 7);
+  const expired = curMonth !== startMonth;
+  let monthLabel = student.planStartedAt;
+  try { monthLabel = new Date(student.planStartedAt + "T00:00:00").toLocaleString("default", { month: "long", year: "numeric" }); } catch (e) {}
+  return { expired, kind: "monthly", label: `Unlimited lessons in ${monthLabel}` };
 }
 
 // ============================================================
@@ -84,6 +93,7 @@ export default function Root() {
   const [session, setSession] = useState(undefined);
   const [profile, setProfile] = useState(undefined);
   const [mode, setMode] = useState("choose");
+  const [isRecovery, setIsRecovery] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("ww:theme") || "dark");
 
   useEffect(() => { localStorage.setItem("ww:theme", theme); }, [theme]);
@@ -91,7 +101,10 @@ export default function Root() {
   useEffect(() => {
     if (!isSupabaseConfigured) { setSession(null); return; }
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
+      setSession(s);
+      if (event === "PASSWORD_RECOVERY") setIsRecovery(true);
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -116,16 +129,11 @@ export default function Root() {
     );
   }
 
-  if (session === undefined) {
-    return (
-      <div className={"lb-root" + (theme === "dark" ? " lb-dark" : "")} style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
-        <style>{CSS}</style>
-        <div className="lb-loading"><LogoMark size={28} /><span>Finding your lane…</span></div>
-      </div>
-    );
+  if (isRecovery) {
+    return <ResetPasswordScreen theme={theme} onDone={() => setIsRecovery(false)} />;
   }
 
-  if (session && profile === undefined) {
+  if (session === undefined || (session && profile === undefined)) {
     return (
       <div className={"lb-root" + (theme === "dark" ? " lb-dark" : "")} style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
         <style>{CSS}</style>
@@ -135,7 +143,7 @@ export default function Root() {
   }
 
   if (session && profile === null) {
-    return <Onboarding theme={theme} onDone={async () => {
+    return <Onboarding theme={theme} userEmail={session.user.email} onDone={async () => {
       const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
       setProfile(data || null);
     }} onSignOut={() => supabase.auth.signOut()} />;
@@ -145,12 +153,8 @@ export default function Root() {
     return <AdminApp session={session} profile={profile} theme={theme} setTheme={setTheme} />;
   }
 
-  if (mode === "student") {
-    return <StudentPortal theme={theme} setTheme={setTheme} onBack={() => setMode("choose")} />;
-  }
-  if (mode === "admin-login") {
-    return <AdminLogin theme={theme} onBack={() => setMode("choose")} />;
-  }
+  if (mode === "student") return <StudentPortal theme={theme} setTheme={setTheme} onBack={() => setMode("choose")} />;
+  if (mode === "admin-login") return <AdminLogin theme={theme} onBack={() => setMode("choose")} />;
 
   return (
     <div className={"lb-root" + (theme === "dark" ? " lb-dark" : "")}>
@@ -160,14 +164,10 @@ export default function Root() {
         <p className="lb-choose-sub">Who's checking in?</p>
         <div className="lb-choose-cards">
           <button className="lb-choose-card" onClick={() => setMode("admin-login")}>
-            <User size={22} />
-            <span>I'm the owner or an instructor</span>
-            <small>Sign in to manage swimmers and curriculum</small>
+            <User size={22} /><span>I'm the owner or an instructor</span><small>Sign in to manage swimmers and curriculum</small>
           </button>
           <button className="lb-choose-card" onClick={() => setMode("student")}>
-            <Sparkles size={22} />
-            <span>I'm a swimmer / parent</span>
-            <small>Enter your access code to view progress</small>
+            <Sparkles size={22} /><span>I'm a swimmer / parent</span><small>Enter your access code to view progress</small>
           </button>
         </div>
       </div>
@@ -176,10 +176,11 @@ export default function Root() {
 }
 
 // ============================================================
-// ADMIN LOGIN (just auth — role/org happens in Onboarding after)
+// ADMIN LOGIN (with forgot password)
 // ============================================================
 function AdminLogin({ theme, onBack }) {
   const [isSignUp, setIsSignUp] = useState(false);
+  const [forgot, setForgot] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -188,13 +189,51 @@ function AdminLogin({ theme, onBack }) {
   async function submit(e) {
     e.preventDefault();
     setError(""); setBusy(true);
-    const fn = isSignUp ? supabase.auth.signUp : supabase.auth.signInWithPassword;
-    const { data, error } = await fn({ email, password });
-    setBusy(false);
-    if (error) { setError(error.message); return; }
-    if (isSignUp && !data.session) {
-      setError("Account created! If email confirmation is on, check your inbox, then come back and sign in — you'll be asked whether to create a new school or join one with an invite code.");
+    try {
+      const { data, error } = isSignUp
+        ? await supabase.auth.signUp({ email, password })
+        : await supabase.auth.signInWithPassword({ email, password });
+      setBusy(false);
+      if (error) { setError(error.message); return; }
+      if (isSignUp && !data.session) {
+        setError("Account created! If email confirmation is on, check your inbox, then come back and sign in — you'll be asked whether to create a new school or join one with an invite code.");
+      }
+    } catch (err) {
+      setBusy(false);
+      setError("Unexpected error: " + (err?.message || String(err)));
     }
+  }
+
+  async function submitForgot(e) {
+    e.preventDefault();
+    setError(""); setBusy(true);
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.href.split("#")[0] });
+      setBusy(false);
+      if (error) { setError(error.message); return; }
+      setError("If that email has an account, a reset link is on its way — check your inbox (and spam folder).");
+    } catch (err) {
+      setBusy(false);
+      setError("Unexpected error: " + (err?.message || String(err)));
+    }
+  }
+
+  if (forgot) {
+    return (
+      <div className={"lb-root" + (theme === "dark" ? " lb-dark" : "")}>
+        <style>{CSS}</style>
+        <div className="lb-choose">
+          <button className="lb-text-btn" onClick={() => setForgot(false)} style={{ alignSelf: "flex-start", marginBottom: 16 }}>&larr; Back to sign in</button>
+          <div className="lb-choose-brand"><LogoMark size={30} /><div className="lb-title">{SCHOOL_NAME.toUpperCase()}</div></div>
+          <p className="lb-choose-sub">Reset your password</p>
+          <form className="lb-login-form" onSubmit={submitForgot}>
+            <input type="email" placeholder="Your account email" required value={email} onChange={e => setEmail(e.target.value)} />
+            {error && <div className="lb-login-error">{error}</div>}
+            <button className="lb-print-btn" type="submit" disabled={busy}>{busy ? "Sending…" : "Send reset link"}</button>
+          </form>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -213,6 +252,7 @@ function AdminLogin({ theme, onBack }) {
         <button className="lb-text-btn" onClick={() => setIsSignUp(v => !v)} style={{ marginTop: 14 }}>
           {isSignUp ? "Already have an account? Sign in" : "First time here? Create an account"}
         </button>
+        {!isSignUp && <button className="lb-text-btn" onClick={() => setForgot(true)} style={{ marginTop: 8 }}>Forgot password?</button>}
         <p className="lb-choose-sub" style={{ fontSize: 11.5, marginTop: 18 }}>
           Both the school owner and instructors sign in the same way — right after this, you'll choose whether you're starting a new school or joining one with an invite code.
         </p>
@@ -222,16 +262,62 @@ function AdminLogin({ theme, onBack }) {
 }
 
 // ============================================================
-// ONBOARDING — shown once, right after first sign-in, when the
-// person has no profile (no org membership) yet.
+// RESET PASSWORD — shown after clicking the emailed reset link
 // ============================================================
-function Onboarding({ theme, onDone, onSignOut }) {
-  const [path, setPath] = useState("choose"); // choose | new-school | join
+function ResetPasswordScreen({ theme, onDone }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError("");
+    if (password.length < 6) { setError("Password must be at least 6 characters."); return; }
+    if (password !== confirm) { setError("Passwords don't match."); return; }
+    setBusy(true);
+    const { error } = await supabase.auth.updateUser({ password });
+    setBusy(false);
+    if (error) { setError(error.message); return; }
+    setDone(true);
+  }
+
+  return (
+    <div className={"lb-root" + (theme === "dark" ? " lb-dark" : "")}>
+      <style>{CSS}</style>
+      <div className="lb-choose">
+        <div className="lb-choose-brand"><LogoMark size={30} /><div className="lb-title">{SCHOOL_NAME.toUpperCase()}</div></div>
+        <p className="lb-choose-sub">Set a new password</p>
+        {done ? (
+          <React.Fragment>
+            <div className="lb-login-error" style={{ background: "var(--mastered-bg)", borderColor: "var(--mastered)", color: "var(--mastered-text)" }}>Password updated!</div>
+            <button className="lb-print-btn" style={{ marginTop: 12 }} onClick={onDone}>Continue</button>
+          </React.Fragment>
+        ) : (
+          <form className="lb-login-form" onSubmit={submit}>
+            <input type="password" placeholder="New password" required minLength={6} value={password} onChange={e => setPassword(e.target.value)} />
+            <input type="password" placeholder="Confirm new password" required minLength={6} value={confirm} onChange={e => setConfirm(e.target.value)} />
+            {error && <div className="lb-login-error">{error}</div>}
+            <button className="lb-print-btn" type="submit" disabled={busy}>{busy ? "Updating…" : "Update password"}</button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// ONBOARDING
+// ============================================================
+function Onboarding({ theme, userEmail, onDone, onSignOut }) {
+  const [path, setPath] = useState("choose");
   const [schoolName, setSchoolName] = useState(SCHOOL_NAME);
   const [displayName, setDisplayName] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const canRegisterSchool = userEmail && userEmail.toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
 
   async function createSchool(e) {
     e.preventDefault();
@@ -259,17 +345,24 @@ function Onboarding({ theme, onDone, onSignOut }) {
           <React.Fragment>
             <p className="lb-choose-sub">One more step — you're signed in, but not linked to a school yet</p>
             <div className="lb-choose-cards">
-              <button className="lb-choose-card" onClick={() => setPath("new-school")}>
-                <User size={22} /><span>Start a new school</span><small>You'll be the owner</small>
-              </button>
+              {canRegisterSchool && (
+                <button className="lb-choose-card" onClick={() => setPath("new-school")}>
+                  <User size={22} /><span>Start a new school</span><small>You'll be the owner</small>
+                </button>
+              )}
               <button className="lb-choose-card" onClick={() => setPath("join")}>
                 <Users size={22} /><span>Join as an instructor</span><small>You'll need an invite code from your owner</small>
               </button>
             </div>
+            {!canRegisterSchool && (
+              <p className="lb-choose-sub" style={{ fontSize: 11.5, marginTop: 14 }}>
+                Registering a new school is limited to the school owner. If you were expecting an instructor invite, ask them for a code.
+              </p>
+            )}
             <button className="lb-text-btn" onClick={onSignOut} style={{ marginTop: 16 }}>Sign out</button>
           </React.Fragment>
         )}
-        {path === "new-school" && (
+        {path === "new-school" && canRegisterSchool && (
           <form className="lb-login-form" onSubmit={createSchool}>
             <button type="button" className="lb-text-btn" onClick={() => setPath("choose")} style={{ alignSelf: "flex-start" }}>&larr; Back</button>
             <input placeholder="Your school's name" value={schoolName} onChange={e => setSchoolName(e.target.value)} />
@@ -297,10 +390,10 @@ function Onboarding({ theme, onDone, onSignOut }) {
 // ============================================================
 function AdminApp({ session, profile, theme, setTheme }) {
   const [loaded, setLoaded] = useState(false);
-  const [curriculum, setCurriculum] = useState([]);
   const [students, setStudents] = useState([]);
+  const [templates, setTemplates] = useState([]);
   const [instructors, setInstructors] = useState([]);
-  const [view, setView] = useState("roster");
+  const [view, setView] = useState("home");
   const [activeStudentId, setActiveStudentId] = useState(null);
   const [addingStudent, setAddingStudent] = useState(false);
   const [newStudentName, setNewStudentName] = useState("");
@@ -310,31 +403,65 @@ function AdminApp({ session, profile, theme, setTheme }) {
   const orgId = profile.org_id;
 
   async function fetchAll() {
-    const { data: levels } = await supabase.from("curriculum_levels").select("*").eq("org_id", orgId).order("position");
-    const { data: skills } = await supabase.from("curriculum_skills").select("*").eq("org_id", orgId).order("position");
     const { data: studentRows } = await supabase.from("students").select("*").eq("org_id", orgId).order("created_at");
+    const studentIds = (studentRows || []).map(s => s.id);
+
+    let levelRows = [], skillRows = [];
+    if (studentIds.length) {
+      const { data: lv } = await supabase.from("curriculum_levels").select("*").in("student_id", studentIds).order("position");
+      levelRows = lv || [];
+      const levelIds = levelRows.map(l => l.id);
+      if (levelIds.length) {
+        const { data: sk } = await supabase.from("curriculum_skills").select("*").in("level_id", levelIds).order("position");
+        skillRows = sk || [];
+      }
+    }
+
     const { data: studentSkillRows } = await supabase.from("student_skills").select("*");
     const { data: sessionRows } = await supabase.from("sessions").select("*").order("date", { ascending: false });
     const { data: profileRows } = await supabase.from("profiles").select("*").eq("org_id", orgId);
 
-    const curr = (levels || []).map(l => ({
-      id: l.id, name: l.name, position: l.position,
-      skills: (skills || []).filter(s => s.level_id === l.id).map(s => ({ id: s.id, name: s.name, position: s.position })),
-    }));
+    const { data: templateRows } = await supabase.from("curriculum_templates").select("*").eq("org_id", orgId);
+    const templateIds = (templateRows || []).map(t => t.id);
+    let templateLevelRows = [], templateSkillRows = [];
+    if (templateIds.length) {
+      const { data: tl } = await supabase.from("template_levels").select("*").in("template_id", templateIds).order("position");
+      templateLevelRows = tl || [];
+      const tlIds = templateLevelRows.map(l => l.id);
+      if (tlIds.length) {
+        const { data: ts } = await supabase.from("template_skills").select("*").in("template_level_id", tlIds).order("position");
+        templateSkillRows = ts || [];
+      }
+    }
+
     const studs = (studentRows || []).map(s => ({
       id: s.id, name: s.name, createdAt: s.created_at, accessCode: s.access_code, instructorId: s.instructor_id,
+      planType: s.plan_type, planStartedAt: s.plan_started_at, packageSize: s.package_size,
+      curriculum: levelRows.filter(l => l.student_id === s.id).map(l => ({
+        id: l.id, name: l.name, position: l.position,
+        skills: skillRows.filter(sk => sk.level_id === l.id).map(sk => ({ id: sk.id, name: sk.name, position: sk.position })),
+      })),
       skills: Object.fromEntries((studentSkillRows || []).filter(ss => ss.student_id === s.id).map(ss => [ss.skill_id, ss.status])),
       sessions: (sessionRows || []).filter(sess => sess.student_id === s.id).map(sess => ({ id: sess.id, date: sess.date, note: sess.note || "", goal: sess.goal || "" })),
     }));
 
-    setCurriculum(curr);
+    const tmpls = (templateRows || []).map(t => ({
+      id: t.id, name: t.name,
+      levels: templateLevelRows.filter(l => l.template_id === t.id).map(l => ({
+        id: l.id, name: l.name, position: l.position,
+        skills: templateSkillRows.filter(sk => sk.template_level_id === l.id).map(sk => ({ id: sk.id, name: sk.name, position: sk.position })),
+      })),
+    }));
+
     setStudents(studs);
+    setTemplates(tmpls);
     setInstructors((profileRows || []).filter(p => p.role === "instructor"));
     setLoaded(true);
   }
 
   useEffect(() => { fetchAll(); /* eslint-disable-next-line */ }, []);
 
+  // ---------- students ----------
   async function addStudent() {
     const name = newStudentName.trim();
     if (!name) return;
@@ -342,7 +469,7 @@ function AdminApp({ session, profile, theme, setTheme }) {
     const id = uid();
     const { error } = await supabase.from("students").insert({ id, org_id: orgId, name, access_code: code, created_at: todayStr() });
     if (error) { alert("Couldn't add swimmer: " + error.message); return; }
-    setStudents(prev => [...prev, { id, name, createdAt: todayStr(), accessCode: code, instructorId: null, skills: {}, sessions: [] }]);
+    setStudents(prev => [...prev, { id, name, createdAt: todayStr(), accessCode: code, instructorId: null, planType: "monthly", planStartedAt: todayStr(), packageSize: 10, curriculum: [], skills: {}, sessions: [] }]);
     setNewStudentName(""); setAddingStudent(false); setActiveStudentId(id); setView("roster");
   }
   async function deleteStudent(id) {
@@ -354,6 +481,13 @@ function AdminApp({ session, profile, theme, setTheme }) {
     setStudents(prev => prev.map(s => s.id === studentId ? { ...s, instructorId: instructorId || null } : s));
     await supabase.from("students").update({ instructor_id: instructorId || null }).eq("id", studentId);
   }
+  async function startNewPeriod(studentId, planType) {
+    const startedAt = todayStr();
+    setStudents(prev => prev.map(s => s.id === studentId ? { ...s, planType, planStartedAt: startedAt } : s));
+    await supabase.from("students").update({ plan_type: planType, plan_started_at: startedAt }).eq("id", studentId);
+  }
+
+  // ---------- per-student skill status + sessions ----------
   async function cycleSkill(studentId, skillId) {
     const student = students.find(s => s.id === studentId);
     const newStatus = nextStatus(student.skills[skillId] || STATUS.NOT_STARTED);
@@ -369,67 +503,162 @@ function AdminApp({ session, profile, theme, setTheme }) {
     setStudents(prev => prev.map(s => s.id === studentId ? { ...s, sessions: s.sessions.filter(x => x.id !== sessionId) } : s));
     await supabase.from("sessions").delete().eq("id", sessionId);
   }
-  async function addLevel() {
-    const id = uid(); const position = curriculum.length;
-    setCurriculum(prev => [...prev, { id, name: "New level", position, skills: [] }]);
-    await supabase.from("curriculum_levels").insert({ id, org_id: orgId, name: "New level", position });
+
+  // ---------- per-student curriculum editing ----------
+  async function addLevel(studentId) {
+    const student = students.find(s => s.id === studentId);
+    const id = uid(); const position = student.curriculum.length;
+    setStudents(prev => prev.map(s => s.id === studentId ? { ...s, curriculum: [...s.curriculum, { id, name: "New level", position, skills: [] }] } : s));
+    await supabase.from("curriculum_levels").insert({ id, student_id: studentId, org_id: orgId, name: "New level", position });
   }
-  async function renameLevel(levelId, name) {
-    setCurriculum(prev => prev.map(l => l.id === levelId ? { ...l, name } : l));
+  async function renameLevel(studentId, levelId, name) {
+    setStudents(prev => prev.map(s => s.id !== studentId ? s : { ...s, curriculum: s.curriculum.map(l => l.id === levelId ? { ...l, name } : l) }));
     await supabase.from("curriculum_levels").update({ name }).eq("id", levelId);
   }
-  async function deleteLevel(levelId) {
-    setCurriculum(prev => prev.filter(l => l.id !== levelId));
+  async function deleteLevel(studentId, levelId) {
+    setStudents(prev => prev.map(s => s.id !== studentId ? s : { ...s, curriculum: s.curriculum.filter(l => l.id !== levelId) }));
     await supabase.from("curriculum_levels").delete().eq("id", levelId);
   }
-  async function moveLevel(levelId, dir) {
-    const idx = curriculum.findIndex(l => l.id === levelId), swapIdx = idx + dir;
-    if (swapIdx < 0 || swapIdx >= curriculum.length) return;
-    const next = [...curriculum];
+  async function moveLevel(studentId, levelId, dir) {
+    const student = students.find(s => s.id === studentId);
+    const idx = student.curriculum.findIndex(l => l.id === levelId), swapIdx = idx + dir;
+    if (swapIdx < 0 || swapIdx >= student.curriculum.length) return;
+    const next = [...student.curriculum];
     [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
     next.forEach((l, i) => { l.position = i; });
-    setCurriculum(next);
+    setStudents(prev => prev.map(s => s.id === studentId ? { ...s, curriculum: next } : s));
     await Promise.all([
       supabase.from("curriculum_levels").update({ position: idx }).eq("id", next[idx].id),
       supabase.from("curriculum_levels").update({ position: swapIdx }).eq("id", next[swapIdx].id),
     ]);
   }
-  async function addSkill(levelId) {
-    const level = curriculum.find(l => l.id === levelId);
+  async function addSkill(studentId, levelId) {
+    const student = students.find(s => s.id === studentId);
+    const level = student.curriculum.find(l => l.id === levelId);
     const id = uid(); const position = level.skills.length;
-    setCurriculum(prev => prev.map(l => l.id === levelId ? { ...l, skills: [...l.skills, { id, name: "New skill", position }] } : l));
+    setStudents(prev => prev.map(s => s.id !== studentId ? s : { ...s, curriculum: s.curriculum.map(l => l.id === levelId ? { ...l, skills: [...l.skills, { id, name: "New skill", position }] } : l) }));
     await supabase.from("curriculum_skills").insert({ id, level_id: levelId, org_id: orgId, name: "New skill", position });
   }
-  async function renameSkill(levelId, skillId, name) {
-    setCurriculum(prev => prev.map(l => l.id === levelId ? { ...l, skills: l.skills.map(sk => sk.id === skillId ? { ...sk, name } : sk) } : l));
+  async function renameSkill(studentId, levelId, skillId, name) {
+    setStudents(prev => prev.map(s => s.id !== studentId ? s : { ...s, curriculum: s.curriculum.map(l => l.id === levelId ? { ...l, skills: l.skills.map(sk => sk.id === skillId ? { ...sk, name } : sk) } : l) }));
     await supabase.from("curriculum_skills").update({ name }).eq("id", skillId);
   }
-  async function deleteSkill(levelId, skillId) {
-    setCurriculum(prev => prev.map(l => l.id === levelId ? { ...l, skills: l.skills.filter(sk => sk.id !== skillId) } : l));
+  async function deleteSkill(studentId, levelId, skillId) {
+    setStudents(prev => prev.map(s => s.id !== studentId ? s : { ...s, curriculum: s.curriculum.map(l => l.id === levelId ? { ...l, skills: l.skills.filter(sk => sk.id !== skillId) } : l) }));
     await supabase.from("curriculum_skills").delete().eq("id", skillId);
   }
-  async function moveSkill(levelId, skillId, dir) {
-    const level = curriculum.find(l => l.id === levelId);
+  async function moveSkill(studentId, levelId, skillId, dir) {
+    const student = students.find(s => s.id === studentId);
+    const level = student.curriculum.find(l => l.id === levelId);
     const idx = level.skills.findIndex(sk => sk.id === skillId), swapIdx = idx + dir;
     if (swapIdx < 0 || swapIdx >= level.skills.length) return;
     const skills = [...level.skills];
     [skills[idx], skills[swapIdx]] = [skills[swapIdx], skills[idx]];
     skills.forEach((sk, i) => { sk.position = i; });
-    setCurriculum(prev => prev.map(l => l.id === levelId ? { ...l, skills } : l));
+    setStudents(prev => prev.map(s => s.id !== studentId ? s : { ...s, curriculum: s.curriculum.map(l => l.id === levelId ? { ...l, skills } : l) }));
     await Promise.all([
       supabase.from("curriculum_skills").update({ position: idx }).eq("id", skills[idx].id),
       supabase.from("curriculum_skills").update({ position: swapIdx }).eq("id", skills[swapIdx].id),
     ]);
   }
-  async function seedDefaultCurriculum() {
-    for (const [levelIdx, lvl] of DEFAULT_CURRICULUM_NAMES.entries()) {
+  async function applyTemplateToStudent(studentId, templateId) {
+    const template = templates.find(t => t.id === templateId);
+    if (!template) return;
+    for (const [levelIdx, lvl] of template.levels.entries()) {
       const levelId = uid();
-      await supabase.from("curriculum_levels").insert({ id: levelId, org_id: orgId, name: lvl.name, position: levelIdx });
-      const skillRows = lvl.skills.map((n, i) => ({ id: uid(), level_id: levelId, org_id: orgId, name: n, position: i }));
-      await supabase.from("curriculum_skills").insert(skillRows);
+      await supabase.from("curriculum_levels").insert({ id: levelId, student_id: studentId, org_id: orgId, name: lvl.name, position: levelIdx });
+      const skillRows = lvl.skills.map((sk, i) => ({ id: uid(), level_id: levelId, org_id: orgId, name: sk.name, position: i }));
+      if (skillRows.length) await supabase.from("curriculum_skills").insert(skillRows);
     }
     fetchAll();
   }
+  async function saveStudentCurriculumAsTemplate(studentId) {
+    const student = students.find(s => s.id === studentId);
+    if (!student || student.curriculum.length === 0) return;
+    const name = prompt("Name this template?", student.name + "'s curriculum");
+    if (!name) return;
+    const { data: tmplRow, error } = await supabase.from("curriculum_templates").insert({ org_id: orgId, name }).select().single();
+    if (error) { alert("Couldn't save template: " + error.message); return; }
+    for (const [levelIdx, lvl] of student.curriculum.entries()) {
+      const { data: lvlRow, error: lvlErr } = await supabase.from("template_levels").insert({ template_id: tmplRow.id, org_id: orgId, name: lvl.name, position: levelIdx }).select().single();
+      if (lvlErr) continue;
+      const skillRows = lvl.skills.map((sk, i) => ({ template_level_id: lvlRow.id, org_id: orgId, name: sk.name, position: i }));
+      if (skillRows.length) await supabase.from("template_skills").insert(skillRows);
+    }
+    await fetchAll();
+    alert(`Saved as template "${name}" — you can apply it to any swimmer from the Templates tab.`);
+  }
+
+  // ---------- templates (owner only) ----------
+  async function addTemplate() {
+    const name = prompt("Template name?", "New template");
+    if (!name) return;
+    const id = uid();
+    setTemplates(prev => [...prev, { id, name, levels: [] }]);
+    await supabase.from("curriculum_templates").insert({ id, org_id: orgId, name });
+  }
+  async function deleteTemplate(templateId) {
+    setTemplates(prev => prev.filter(t => t.id !== templateId));
+    await supabase.from("curriculum_templates").delete().eq("id", templateId);
+  }
+  async function addTemplateLevel(templateId) {
+    const template = templates.find(t => t.id === templateId);
+    const id = uid(); const position = template.levels.length;
+    setTemplates(prev => prev.map(t => t.id === templateId ? { ...t, levels: [...t.levels, { id, name: "New level", position, skills: [] }] } : t));
+    await supabase.from("template_levels").insert({ id, template_id: templateId, org_id: orgId, name: "New level", position });
+  }
+  async function renameTemplateLevel(templateId, levelId, name) {
+    setTemplates(prev => prev.map(t => t.id !== templateId ? t : { ...t, levels: t.levels.map(l => l.id === levelId ? { ...l, name } : l) }));
+    await supabase.from("template_levels").update({ name }).eq("id", levelId);
+  }
+  async function deleteTemplateLevel(templateId, levelId) {
+    setTemplates(prev => prev.map(t => t.id !== templateId ? t : { ...t, levels: t.levels.filter(l => l.id !== levelId) }));
+    await supabase.from("template_levels").delete().eq("id", levelId);
+  }
+  async function moveTemplateLevel(templateId, levelId, dir) {
+    const template = templates.find(t => t.id === templateId);
+    const idx = template.levels.findIndex(l => l.id === levelId), swapIdx = idx + dir;
+    if (swapIdx < 0 || swapIdx >= template.levels.length) return;
+    const next = [...template.levels];
+    [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
+    next.forEach((l, i) => { l.position = i; });
+    setTemplates(prev => prev.map(t => t.id === templateId ? { ...t, levels: next } : t));
+    await Promise.all([
+      supabase.from("template_levels").update({ position: idx }).eq("id", next[idx].id),
+      supabase.from("template_levels").update({ position: swapIdx }).eq("id", next[swapIdx].id),
+    ]);
+  }
+  async function addTemplateSkill(templateId, levelId) {
+    const template = templates.find(t => t.id === templateId);
+    const level = template.levels.find(l => l.id === levelId);
+    const id = uid(); const position = level.skills.length;
+    setTemplates(prev => prev.map(t => t.id !== templateId ? t : { ...t, levels: t.levels.map(l => l.id === levelId ? { ...l, skills: [...l.skills, { id, name: "New skill", position }] } : l) }));
+    await supabase.from("template_skills").insert({ id, template_level_id: levelId, org_id: orgId, name: "New skill", position });
+  }
+  async function renameTemplateSkill(templateId, levelId, skillId, name) {
+    setTemplates(prev => prev.map(t => t.id !== templateId ? t : { ...t, levels: t.levels.map(l => l.id === levelId ? { ...l, skills: l.skills.map(sk => sk.id === skillId ? { ...sk, name } : sk) } : l) }));
+    await supabase.from("template_skills").update({ name }).eq("id", skillId);
+  }
+  async function deleteTemplateSkill(templateId, levelId, skillId) {
+    setTemplates(prev => prev.map(t => t.id !== templateId ? t : { ...t, levels: t.levels.map(l => l.id === levelId ? { ...l, skills: l.skills.filter(sk => sk.id !== skillId) } : l) }));
+    await supabase.from("template_skills").delete().eq("id", skillId);
+  }
+  async function moveTemplateSkill(templateId, levelId, skillId, dir) {
+    const template = templates.find(t => t.id === templateId);
+    const level = template.levels.find(l => l.id === levelId);
+    const idx = level.skills.findIndex(sk => sk.id === skillId), swapIdx = idx + dir;
+    if (swapIdx < 0 || swapIdx >= level.skills.length) return;
+    const skills = [...level.skills];
+    [skills[idx], skills[swapIdx]] = [skills[swapIdx], skills[idx]];
+    skills.forEach((sk, i) => { sk.position = i; });
+    setTemplates(prev => prev.map(t => t.id !== templateId ? t : { ...t, levels: t.levels.map(l => l.id === levelId ? { ...l, skills } : l) }));
+    await Promise.all([
+      supabase.from("template_skills").update({ position: idx }).eq("id", skills[idx].id),
+      supabase.from("template_skills").update({ position: swapIdx }).eq("id", skills[swapIdx].id),
+    ]);
+  }
+
+  // ---------- instructors ----------
   const [inviteCode, setInviteCode] = useState("");
   const [inviteBusy, setInviteBusy] = useState(false);
   async function generateInvite() {
@@ -453,13 +682,11 @@ function AdminApp({ session, profile, theme, setTheme }) {
     const inst = instructors.find(i => i.id === id);
     return inst ? (inst.display_name || inst.email || "Instructor") : "Unassigned";
   };
+  const myName = profile.display_name || (profile.email ? profile.email.split("@")[0] : "there");
+  const expiredCount = students.filter(s => planStatusFor(s).expired).length;
 
   if (showReport && activeStudent) {
-    return (
-      <PrintReportPage student={activeStudent} curriculum={curriculum}
-        levelProgress={levelProgressFor} overallProgress={s => overallProgressFor(s, curriculum)}
-        currentFocusLevel={s => currentFocusLevelFor(s, curriculum)} onBack={() => setShowReport(false)} />
-    );
+    return <PrintReportPage student={activeStudent} onBack={() => setShowReport(false)} />;
   }
   if (!loaded) {
     return (
@@ -480,8 +707,9 @@ function AdminApp({ session, profile, theme, setTheme }) {
         </div>
         <div className="lb-header-right">
           <nav className="lb-tabs">
+            <button className={"lb-tab" + (view === "home" ? " active" : "")} onClick={() => setView("home")}><Home size={15} /> Home</button>
             <button className={"lb-tab" + (view === "roster" ? " active" : "")} onClick={() => setView("roster")}><User size={15} /> Roster</button>
-            {isOwner && <button className={"lb-tab" + (view === "curriculum" ? " active" : "")} onClick={() => setView("curriculum")}><ListChecks size={15} /> Curriculum</button>}
+            {isOwner && <button className={"lb-tab" + (view === "templates" ? " active" : "")} onClick={() => setView("templates")}><LayoutTemplate size={15} /> Templates</button>}
             {isOwner && <button className={"lb-tab" + (view === "instructors" ? " active" : "")} onClick={() => setView("instructors")}><Users size={15} /> Instructors</button>}
           </nav>
           <button className="lb-theme-toggle" onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}</button>
@@ -490,6 +718,30 @@ function AdminApp({ session, profile, theme, setTheme }) {
       </header>
 
       <div className="lb-body">
+        {view === "home" && (
+          <main className="lb-main" style={{ width: "100%" }}>
+            <h2 className="lb-home-greeting">Hello, {myName}! 👋</h2>
+            <p className="lb-choose-sub" style={{ textAlign: "left", marginBottom: 22 }}>Here's what's going on at {SCHOOL_NAME}.</p>
+            <div className="lb-stat-grid">
+              <div className="lb-stat-card">
+                <div className="lb-stat-num">{students.length}</div>
+                <div className="lb-stat-label">{isOwner ? "Total swimmers" : "Your swimmers"}</div>
+              </div>
+              <div className="lb-stat-card" style={expiredCount > 0 ? { borderColor: "var(--rope)" } : {}}>
+                <div className="lb-stat-num" style={expiredCount > 0 ? { color: "var(--rope)" } : {}}>{expiredCount}</div>
+                <div className="lb-stat-label">Lesson period ended</div>
+              </div>
+              {isOwner && (
+                <div className="lb-stat-card">
+                  <div className="lb-stat-num">{instructors.length}</div>
+                  <div className="lb-stat-label">Instructors</div>
+                </div>
+              )}
+            </div>
+            <button className="lb-print-btn" onClick={() => setView("roster")}>Go to roster &rarr;</button>
+          </main>
+        )}
+
         {view === "roster" && (
           <React.Fragment>
             <aside className="lb-roster">
@@ -506,18 +758,16 @@ function AdminApp({ session, profile, theme, setTheme }) {
                 </div>
               )}
               {students.length === 0 && <div className="lb-empty-note">{isOwner ? "No swimmers yet. Tap + to add your first one." : "No swimmers assigned to you yet."}</div>}
-              {isOwner && curriculum.length === 0 && (
-                <button className="lb-add-level-btn" style={{ marginBottom: 12, fontSize: 12 }} onClick={seedDefaultCurriculum}>Start from a sample curriculum</button>
-              )}
               <ul className="lb-roster-list">
                 {students.map(s => {
-                  const pct = overallProgressFor(s, curriculum), focus = currentFocusLevelFor(s, curriculum);
+                  const pct = overallProgressFor(s), focus = currentFocusLevelFor(s);
+                  const plan = planStatusFor(s);
                   return (
                     <li key={s.id}>
                       <button className={"lb-roster-item" + (activeStudentId === s.id ? " active" : "")} onClick={() => setActiveStudentId(s.id)}>
                         <span className="lb-avatar">{s.name.trim().charAt(0).toUpperCase() || "?"}</span>
                         <span className="lb-roster-item-text">
-                          <span className="lb-roster-name">{s.name}</span>
+                          <span className="lb-roster-name">{s.name} {plan.expired && <AlertTriangle size={11} style={{ color: "var(--rope)", verticalAlign: "middle" }} />}</span>
                           <span className="lb-roster-level">{focus ? focus.name : "No curriculum yet"}{isOwner ? " · " + instructorName(s.instructorId) : ""}</span>
                         </span>
                         <span className="lb-mini-ring" style={{ "--pct": pct }}><span>{pct}%</span></span>
@@ -531,52 +781,74 @@ function AdminApp({ session, profile, theme, setTheme }) {
               {!activeStudent ? (
                 <div className="lb-placeholder"><Sparkles size={26} /><p>Pick a swimmer from the list to see their lane.</p></div>
               ) : (
-                <StudentDetail student={activeStudent} curriculum={curriculum} isOwner={isOwner} instructors={instructors}
+                <StudentDetail
+                  student={activeStudent} isOwner={isOwner} instructors={instructors} templates={templates}
                   instructorName={instructorName} onAssignInstructor={val => assignInstructor(activeStudent.id, val)}
-                  levelProgress={levelProgressFor} overallProgress={s => overallProgressFor(s, curriculum)}
-                  currentFocusLevel={s => currentFocusLevelFor(s, curriculum)}
+                  onStartNewPeriod={planType => startNewPeriod(activeStudent.id, planType)}
                   onCycleSkill={skillId => cycleSkill(activeStudent.id, skillId)}
                   onAddSession={session => addSession(activeStudent.id, session)}
                   onDeleteSession={sessionId => deleteSession(activeStudent.id, sessionId)}
                   onDeleteStudent={() => deleteStudent(activeStudent.id)}
-                  onPrintReport={() => setShowReport(true)} />
+                  onPrintReport={() => setShowReport(true)}
+                  onApplyTemplate={templateId => applyTemplateToStudent(activeStudent.id, templateId)}
+                  onSaveAsTemplate={() => saveStudentCurriculumAsTemplate(activeStudent.id)}
+                  onAddLevel={() => addLevel(activeStudent.id)}
+                  onRenameLevel={(levelId, name) => renameLevel(activeStudent.id, levelId, name)}
+                  onDeleteLevel={levelId => deleteLevel(activeStudent.id, levelId)}
+                  onMoveLevel={(levelId, dir) => moveLevel(activeStudent.id, levelId, dir)}
+                  onAddSkill={levelId => addSkill(activeStudent.id, levelId)}
+                  onRenameSkill={(levelId, skillId, name) => renameSkill(activeStudent.id, levelId, skillId, name)}
+                  onDeleteSkill={(levelId, skillId) => deleteSkill(activeStudent.id, levelId, skillId)}
+                  onMoveSkill={(levelId, skillId, dir) => moveSkill(activeStudent.id, levelId, skillId, dir)}
+                />
               )}
             </main>
           </React.Fragment>
         )}
 
-        {view === "curriculum" && isOwner && (
+        {view === "templates" && isOwner && (
           <main className="lb-main">
             <div className="lb-curriculum-intro">
-              <h2>Your curriculum</h2>
-              <p>Shape this to match how <em>you</em> teach. Every swimmer's lane updates automatically — instructors see this too, but only you can edit it.</p>
+              <h2>Curriculum templates</h2>
+              <p>Build reusable curricula here, then apply any of them to a swimmer from their profile. Editing a template never changes a swimmer who already applied it — each swimmer's curriculum is their own from that point on.</p>
             </div>
             <div className="lb-levels-editor">
-              {curriculum.map((level, idx) => (
-                <div className="lb-level-card" key={level.id}>
+              {templates.map(template => (
+                <div className="lb-level-card" key={template.id} style={{ borderColor: "var(--pool)" }}>
                   <div className="lb-level-card-head">
-                    <span className="lb-level-num">{String(idx + 1).padStart(2, "0")}</span>
-                    <input className="lb-level-name-input" value={level.name} onChange={e => renameLevel(level.id, e.target.value)} />
-                    <div className="lb-level-card-actions">
-                      <button className="lb-icon-btn ghost" disabled={idx === 0} onClick={() => moveLevel(level.id, -1)}><ChevronUp size={15} /></button>
-                      <button className="lb-icon-btn ghost" disabled={idx === curriculum.length - 1} onClick={() => moveLevel(level.id, 1)}><ChevronDown size={15} /></button>
-                      <button className="lb-icon-btn ghost danger" onClick={() => deleteLevel(level.id)}><Trash2 size={15} /></button>
-                    </div>
+                    <span style={{ fontWeight: 700, fontSize: 15 }}>{template.name}</span>
+                    <button className="lb-icon-btn ghost danger" style={{ marginLeft: "auto" }} onClick={() => deleteTemplate(template.id)}><Trash2 size={15} /></button>
                   </div>
-                  <ul className="lb-skill-editor-list">
-                    {level.skills.map((sk, sIdx) => (
-                      <li key={sk.id}>
-                        <input value={sk.name} onChange={e => renameSkill(level.id, sk.id, e.target.value)} />
-                        <button className="lb-icon-btn ghost" disabled={sIdx === 0} onClick={() => moveSkill(level.id, sk.id, -1)}><ChevronUp size={13} /></button>
-                        <button className="lb-icon-btn ghost" disabled={sIdx === level.skills.length - 1} onClick={() => moveSkill(level.id, sk.id, 1)}><ChevronDown size={13} /></button>
-                        <button className="lb-icon-btn ghost danger" onClick={() => deleteSkill(level.id, sk.id)}><X size={13} /></button>
-                      </li>
+                  <div className="lb-levels-editor" style={{ marginLeft: 8 }}>
+                    {template.levels.map((level, idx) => (
+                      <div className="lb-level-card" key={level.id}>
+                        <div className="lb-level-card-head">
+                          <span className="lb-level-num">{String(idx + 1).padStart(2, "0")}</span>
+                          <input className="lb-level-name-input" value={level.name} onChange={e => renameTemplateLevel(template.id, level.id, e.target.value)} />
+                          <div className="lb-level-card-actions">
+                            <button className="lb-icon-btn ghost" disabled={idx === 0} onClick={() => moveTemplateLevel(template.id, level.id, -1)}><ChevronUp size={15} /></button>
+                            <button className="lb-icon-btn ghost" disabled={idx === template.levels.length - 1} onClick={() => moveTemplateLevel(template.id, level.id, 1)}><ChevronDown size={15} /></button>
+                            <button className="lb-icon-btn ghost danger" onClick={() => deleteTemplateLevel(template.id, level.id)}><Trash2 size={15} /></button>
+                          </div>
+                        </div>
+                        <ul className="lb-skill-editor-list">
+                          {level.skills.map((sk, sIdx) => (
+                            <li key={sk.id}>
+                              <input value={sk.name} onChange={e => renameTemplateSkill(template.id, level.id, sk.id, e.target.value)} />
+                              <button className="lb-icon-btn ghost" disabled={sIdx === 0} onClick={() => moveTemplateSkill(template.id, level.id, sk.id, -1)}><ChevronUp size={13} /></button>
+                              <button className="lb-icon-btn ghost" disabled={sIdx === level.skills.length - 1} onClick={() => moveTemplateSkill(template.id, level.id, sk.id, 1)}><ChevronDown size={13} /></button>
+                              <button className="lb-icon-btn ghost danger" onClick={() => deleteTemplateSkill(template.id, level.id, sk.id)}><X size={13} /></button>
+                            </li>
+                          ))}
+                        </ul>
+                        <button className="lb-add-skill-btn" onClick={() => addTemplateSkill(template.id, level.id)}><Plus size={13} /> Add skill</button>
+                      </div>
                     ))}
-                  </ul>
-                  <button className="lb-add-skill-btn" onClick={() => addSkill(level.id)}><Plus size={13} /> Add skill</button>
+                    <button className="lb-add-level-btn" onClick={() => addTemplateLevel(template.id)}><Plus size={16} /> Add level</button>
+                  </div>
                 </div>
               ))}
-              <button className="lb-add-level-btn" onClick={addLevel}><Plus size={16} /> Add level</button>
+              <button className="lb-add-level-btn" onClick={addTemplate}><Plus size={16} /> New template</button>
             </div>
           </main>
         )}
@@ -625,12 +897,22 @@ function AdminApp({ session, profile, theme, setTheme }) {
   );
 }
 
-function StudentDetail({ student, curriculum, isOwner, instructors, instructorName, onAssignInstructor, levelProgress, overallProgress, currentFocusLevel, onCycleSkill, onAddSession, onDeleteSession, onDeleteStudent, onPrintReport }) {
+// ============================================================
+// STUDENT DETAIL
+// ============================================================
+function StudentDetail({
+  student, isOwner, instructors, templates, instructorName, onAssignInstructor, onStartNewPeriod,
+  onCycleSkill, onAddSession, onDeleteSession, onDeleteStudent, onPrintReport, onApplyTemplate, onSaveAsTemplate,
+  onAddLevel, onRenameLevel, onDeleteLevel, onMoveLevel, onAddSkill, onRenameSkill, onDeleteSkill, onMoveSkill,
+}) {
   const [note, setNote] = useState(""), [goal, setGoal] = useState(""), [date, setDate] = useState(todayStr());
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
-  const focus = currentFocusLevel(student), pct = overallProgress(student);
+  const [editingCurriculum, setEditingCurriculum] = useState(false);
+  const [pickedTemplate, setPickedTemplate] = useState("");
+  const focus = currentFocusLevelFor(student), pct = overallProgressFor(student);
   const suggestions = suggestedSkills(student, focus);
+  const plan = planStatusFor(student);
 
   function submitSession(e) {
     e.preventDefault();
@@ -670,30 +952,102 @@ function StudentDetail({ student, curriculum, isOwner, instructors, instructorNa
         </div>
       </div>
 
-      <section className="lb-lanes">
-        {curriculum.map((level, idx) => {
-          const { pct: lp, total } = levelProgress(student, level);
-          if (total === 0) return null;
-          return (
-            <div className="lb-lane" key={level.id}>
-              <div className="lb-lane-label"><span className="lb-lane-num">{String(idx + 1).padStart(2, "0")}</span><span>{level.name}</span><span className="lb-lane-pct">{Math.round(lp)}%</span></div>
-              <div className="lb-lane-track">
-                <div className="lb-lane-rope" />
-                {level.skills.map(sk => {
-                  const st = student.skills[sk.id] || STATUS.NOT_STARTED;
-                  return (
-                    <button key={sk.id} className={"lb-tile " + st} onClick={() => onCycleSkill(sk.id)} title={STATUS_LABEL[st]}>
-                      <span className="lb-tile-check">{st === STATUS.MASTERED ? <Check size={12} /> : null}</span>
-                      <span className="lb-tile-name">{sk.name}</span>
-                      <span className="lb-tile-status">{STATUS_LABEL[st]}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })}
+      <section className={"lb-plan-card" + (plan.expired ? " expired" : "")}>
+        <div className="lb-plan-info">
+          <span className="lb-plan-badge">{plan.kind === "monthly" ? "Monthly" : "10-Lesson Package"}</span>
+          <span className="lb-plan-text">{plan.expired ? "Lesson period has ended" : plan.label}</span>
+        </div>
+        {isOwner ? (
+          <div className="lb-plan-actions">
+            <button className="lb-print-btn" onClick={() => onStartNewPeriod("monthly")}>Start new Monthly period</button>
+            <button className="lb-print-btn" onClick={() => onStartNewPeriod("package")}>Start new Package (10 lessons)</button>
+          </div>
+        ) : plan.expired && <span className="lb-plan-text" style={{ color: "var(--rope)" }}>Ask the owner to renew this student's plan</span>}
       </section>
+
+      {student.curriculum.length === 0 ? (
+        <section className="lb-empty-note" style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 20 }}>
+          {isOwner ? (
+            <React.Fragment>
+              <p style={{ marginTop: 0 }}>This swimmer has no curriculum yet. Start from a template, or build one from scratch.</p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <select value={pickedTemplate} onChange={e => setPickedTemplate(e.target.value)} style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)" }}>
+                  <option value="">Choose a template…</option>
+                  {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+                <button className="lb-print-btn" disabled={!pickedTemplate} onClick={() => onApplyTemplate(pickedTemplate)}>Apply template</button>
+                <button className="lb-add-level-btn" style={{ padding: "8px 14px" }} onClick={onAddLevel}><Plus size={14} /> Start from scratch</button>
+              </div>
+            </React.Fragment>
+          ) : (
+            <p style={{ margin: 0 }}>This swimmer doesn't have a curriculum yet. Ask the school owner to set one up.</p>
+          )}
+        </section>
+      ) : (
+        <React.Fragment>
+          {isOwner && (
+            <div style={{ marginBottom: 14, display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
+              <button className="lb-text-btn" onClick={() => setEditingCurriculum(v => !v)}>{editingCurriculum ? "Done editing curriculum" : "Edit this swimmer's curriculum"}</button>
+              <button className="lb-text-btn" onClick={onSaveAsTemplate}>Save as reusable template</button>
+            </div>
+          )}
+
+          {editingCurriculum && isOwner ? (
+            <section className="lb-levels-editor" style={{ marginBottom: 26 }}>
+              {student.curriculum.map((level, idx) => (
+                <div className="lb-level-card" key={level.id}>
+                  <div className="lb-level-card-head">
+                    <span className="lb-level-num">{String(idx + 1).padStart(2, "0")}</span>
+                    <input className="lb-level-name-input" value={level.name} onChange={e => onRenameLevel(level.id, e.target.value)} />
+                    <div className="lb-level-card-actions">
+                      <button className="lb-icon-btn ghost" disabled={idx === 0} onClick={() => onMoveLevel(level.id, -1)}><ChevronUp size={15} /></button>
+                      <button className="lb-icon-btn ghost" disabled={idx === student.curriculum.length - 1} onClick={() => onMoveLevel(level.id, 1)}><ChevronDown size={15} /></button>
+                      <button className="lb-icon-btn ghost danger" onClick={() => onDeleteLevel(level.id)}><Trash2 size={15} /></button>
+                    </div>
+                  </div>
+                  <ul className="lb-skill-editor-list">
+                    {level.skills.map((sk, sIdx) => (
+                      <li key={sk.id}>
+                        <input value={sk.name} onChange={e => onRenameSkill(level.id, sk.id, e.target.value)} />
+                        <button className="lb-icon-btn ghost" disabled={sIdx === 0} onClick={() => onMoveSkill(level.id, sk.id, -1)}><ChevronUp size={13} /></button>
+                        <button className="lb-icon-btn ghost" disabled={sIdx === level.skills.length - 1} onClick={() => onMoveSkill(level.id, sk.id, 1)}><ChevronDown size={13} /></button>
+                        <button className="lb-icon-btn ghost danger" onClick={() => onDeleteSkill(level.id, sk.id)}><X size={13} /></button>
+                      </li>
+                    ))}
+                  </ul>
+                  <button className="lb-add-skill-btn" onClick={() => onAddSkill(level.id)}><Plus size={13} /> Add skill</button>
+                </div>
+              ))}
+              <button className="lb-add-level-btn" onClick={onAddLevel}><Plus size={16} /> Add level</button>
+            </section>
+          ) : (
+            <section className="lb-lanes">
+              {student.curriculum.map((level, idx) => {
+                const { pct: lp, total } = levelProgressFor(student, level);
+                if (total === 0) return null;
+                return (
+                  <div className="lb-lane" key={level.id}>
+                    <div className="lb-lane-label"><span className="lb-lane-num">{String(idx + 1).padStart(2, "0")}</span><span>{level.name}</span><span className="lb-lane-pct">{Math.round(lp)}%</span></div>
+                    <div className="lb-lane-track">
+                      <div className="lb-lane-rope" />
+                      {level.skills.map(sk => {
+                        const st = student.skills[sk.id] || STATUS.NOT_STARTED;
+                        return (
+                          <button key={sk.id} className={"lb-tile " + st} onClick={() => onCycleSkill(sk.id)} title={STATUS_LABEL[st]}>
+                            <span className="lb-tile-check">{st === STATUS.MASTERED ? <Check size={12} /> : null}</span>
+                            <span className="lb-tile-name">{sk.name}</span>
+                            <span className="lb-tile-status">{STATUS_LABEL[st]}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </section>
+          )}
+        </React.Fragment>
+      )}
 
       <section className="lb-timeline-section">
         <h3><CalendarDays size={16} /> Session timeline</h3>
@@ -729,6 +1083,9 @@ function StudentDetail({ student, curriculum, isOwner, instructors, instructorNa
   );
 }
 
+// ============================================================
+// STUDENT PORTAL (public, no login)
+// ============================================================
 function StudentPortal({ theme, setTheme, onBack }) {
   const [code, setCode] = useState("");
   const [data, setData] = useState(null);
@@ -746,11 +1103,11 @@ function StudentPortal({ theme, setTheme, onBack }) {
   }
 
   if (data) {
-    const student = { skills: {} };
+    const student = { skills: {}, curriculum: data.levels || [] };
     (data.levels || []).forEach(l => l.skills.forEach(sk => { student.skills[sk.id] = sk.status; }));
     const curriculum = data.levels || [];
-    const pct = overallProgressFor(student, curriculum);
-    const focus = currentFocusLevelFor(student, curriculum);
+    const pct = overallProgressFor(student);
+    const focus = currentFocusLevelFor(student);
     return (
       <div className={"lb-root" + (theme === "dark" ? " lb-dark" : "")}>
         <style>{CSS}</style>
@@ -826,8 +1183,11 @@ function StudentPortal({ theme, setTheme, onBack }) {
   );
 }
 
-function PrintReportPage({ student, curriculum, levelProgress, overallProgress, currentFocusLevel, onBack }) {
-  const pct = overallProgress(student), focus = currentFocusLevel(student), sessions = student.sessions;
+// ============================================================
+// PRINTABLE REPORT
+// ============================================================
+function PrintReportPage({ student, onBack }) {
+  const pct = overallProgressFor(student), focus = currentFocusLevelFor(student), sessions = student.sessions;
   return (
     <div className="lb-report-page">
       <style>{CSS}</style>
@@ -845,8 +1205,8 @@ function PrintReportPage({ student, curriculum, levelProgress, overallProgress, 
           <div className="lb-report-overall"><div className="lb-report-overall-pct">{pct}%</div><div className="lb-report-overall-label">overall progress</div></div>
         </div>
         <table className="lb-report-table">
-          {curriculum.map(level => {
-            const { pct: lp, total } = levelProgress(student, level);
+          {student.curriculum.map(level => {
+            const { pct: lp, total } = levelProgressFor(student, level);
             if (total === 0) return null;
             return (
               <React.Fragment key={level.id}>
@@ -904,6 +1264,8 @@ const CSS = `
   --suggestion-bg:#241C10; --suggestion-border:#4A3A1C; --suggestion-text:#E0AF52;
 }
 *{box-sizing:border-box;}
+html, body, #root { width:100%; }
+html, body { overflow-x:hidden; }
 .lb-root{ font-family:'Inter',sans-serif; background:var(--wash); color:var(--ink); min-height:100vh; }
 .lb-root input, .lb-root textarea, .lb-root select{ background:var(--card); color:var(--ink); border-color:var(--border); font-family:inherit; }
 .lb-loading{ display:flex; flex-direction:column; align-items:center; gap:10px; color:var(--pool); font-family:'IBM Plex Mono',monospace; }
@@ -913,8 +1275,8 @@ const CSS = `
 .lb-brand{ display:flex; align-items:center; gap:10px; color:#fff; }
 .lb-title{ font-family:'Bebas Neue',sans-serif; font-size:22px; letter-spacing:2px; line-height:1; }
 .lb-subtitle{ font-size:11px; color:#BFE3DE; letter-spacing:0.5px; }
-.lb-header-right{ display:flex; align-items:center; gap:10px; }
-.lb-tabs{ display:flex; gap:6px; }
+.lb-header-right{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.lb-tabs{ display:flex; gap:6px; flex-wrap:wrap; }
 .lb-tab{ display:flex; align-items:center; gap:6px; padding:8px 14px; border-radius:999px; border:1px solid rgba(255,255,255,0.25); background:transparent; color:#DCEFEC; font-size:13px; font-weight:600; cursor:pointer; }
 .lb-tab.active{ background:var(--rope); border-color:var(--rope); color:#fff; }
 .lb-theme-toggle{ display:flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:50%; border:1px solid rgba(255,255,255,0.25); background:transparent; color:#DCEFEC; cursor:pointer; }
@@ -973,11 +1335,22 @@ const CSS = `
   background: conic-gradient(var(--pool) calc(var(--pct)*1%), var(--notstarted) 0);
 }
 .lb-mini-ring span{ background:var(--card); width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:8px; color:var(--ink); }
+.lb-plan-card{ display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px 16px; margin-bottom:20px; }
+.lb-plan-card.expired{ border-color:var(--rope); background:var(--suggestion-bg); }
+.lb-plan-info{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.lb-plan-badge{ font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; background:var(--pool); color:#fff; padding:4px 9px; border-radius:999px; }
+.lb-plan-text{ font-size:13px; color:var(--ink); }
+.lb-plan-actions{ display:flex; gap:8px; flex-wrap:wrap; }
+.lb-home-greeting{ font-family:'Bebas Neue',sans-serif; font-size:30px; letter-spacing:1px; margin:0 0 4px; }
+.lb-stat-grid{ display:flex; gap:14px; flex-wrap:wrap; margin-bottom:24px; }
+.lb-stat-card{ background:var(--card); border:1px solid var(--border); border-radius:14px; padding:18px 22px; min-width:140px; }
+.lb-stat-num{ font-family:'IBM Plex Mono',monospace; font-size:30px; font-weight:600; color:var(--pool); }
+.lb-stat-label{ font-size:12px; color:var(--muted); margin-top:4px; }
 .lb-lanes{ display:flex; flex-direction:column; gap:16px; margin-bottom:26px; }
 .lb-lane-label{ display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; margin-bottom:6px; }
 .lb-lane-num{ font-family:'IBM Plex Mono',monospace; color:var(--rope); font-size:11px; }
 .lb-lane-pct{ margin-left:auto; font-family:'IBM Plex Mono',monospace; color:var(--muted); font-size:12px; }
-.lb-lane-track{ position:relative; display:flex; gap:4px; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:8px; overflow-x:auto; }
+.lb-lane-track{ position:relative; display:flex; flex-wrap:wrap; gap:4px; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:8px; }
 .lb-lane-rope{ position:absolute; top:0; left:16px; right:16px; height:1px; background-image:repeating-linear-gradient(90deg, var(--rope) 0 6px, transparent 6px 12px); opacity:0.5; }
 .lb-tile{ flex:1; min-width:96px; display:flex; flex-direction:column; align-items:flex-start; gap:4px; padding:9px 10px; border-radius:9px; border:1px solid var(--border); background:var(--wash); cursor:pointer; text-align:left; color:var(--ink); }
 .lb-tile-name{ font-size:12px; font-weight:600; line-height:1.25; }
@@ -998,7 +1371,7 @@ const CSS = `
 .lb-timeline-item::before{ content:""; position:absolute; left:9px; top:14px; bottom:0; width:1px; background:var(--border); }
 .lb-timeline-item:last-child::before{ display:none; }
 .lb-timeline-dot{ width:10px; height:10px; border-radius:50%; background:var(--pool); margin-top:4px; flex-shrink:0; }
-.lb-timeline-content{ flex:1; }
+.lb-timeline-content{ flex:1; min-width:0; overflow-wrap:break-word; word-break:break-word; }
 .lb-timeline-date{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--pool); }
 .lb-timeline-note{ font-size:13px; margin-top:2px; }
 .lb-timeline-goal{ font-size:12px; color:var(--muted); margin-top:2px; }
@@ -1021,11 +1394,13 @@ const CSS = `
 @media (max-width: 760px){
   .lb-body{ flex-direction:column; }
   .lb-roster{ width:100%; border-right:none; border-bottom:1px solid var(--border); min-height:auto; }
-  .lb-roster-list{ flex-direction:row; overflow-x:auto; padding-bottom:4px; }
-  .lb-roster-item{ width:auto; min-width:180px; }
+  .lb-roster-list{ flex-direction:row; flex-wrap:wrap; overflow-x:visible; padding-bottom:4px; }
+  .lb-roster-item{ width:auto; flex:1 1 150px; min-width:0; }
+  .lb-roster-name, .lb-roster-level{ overflow:hidden; text-overflow:ellipsis; }
   .lb-main{ padding:16px; }
   .lb-session-form{ flex-direction:column; }
   .lb-session-form input[type="date"]{ width:100%; }
+  .lb-header{ padding:12px 14px; }
 }
 .lb-print-btn{ display:flex; align-items:center; gap:6px; padding:7px 12px; border-radius:8px; border:1px solid var(--pool); background:var(--card); color:var(--pool); font-weight:600; font-size:12.5px; cursor:pointer; }
 .lb-print-btn:hover{ background:var(--wash); }
